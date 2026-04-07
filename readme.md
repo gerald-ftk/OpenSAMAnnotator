@@ -10,7 +10,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python)](https://python.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?style=flat-square&logo=typescript)](https://typescriptlang.org/)
 
-![Hero Screenshot](assets\images\dataset_dashboard.png)
+![Hero Screenshot](assets/images/dataset_dashboard.png)
 *The main dashboard after loading a dataset — showing image count, annotation coverage, class distribution chart, and train/val/test split breakdown.*
 
 ---
@@ -40,7 +40,7 @@ Load datasets from a local folder or upload a ZIP. The backend auto-detects the 
 | Pascal VOC | `Annotations/*.xml`, `JPEGImages/` |
 | ImageNet-style Classification | `class_name/` subfolders |
 
-![Datasets View](assets\images\datasets_view.png)
+![Datasets View](assets/images/datasets_view.png)
 *The Datasets view showing loaded datasets with format badges, image counts, and action buttons for inspect, duplicate-scan, and delete.*
 
 ---
@@ -53,7 +53,7 @@ Review images one at a time with annotations overlaid. Keyboard-driven — left 
 - Filter by class
 - Shift-click range selection for batch delete or split-move
 
-![Sorting View](assets\images\sort&filter.png)
+![Sorting View](assets/images/sort&filter.png)
 *The Sort & Filter view with an image displayed, bounding box overlays visible, and the keep/delete keyboard hint at the bottom.*
 
 ---
@@ -71,7 +71,7 @@ A built-in annotation canvas for creating and editing labels without leaving the
 
 Full undo/redo history (`Ctrl+Z` / `Ctrl+Y`). Auto-annotation via loaded YOLO or RT-DETR models with configurable confidence threshold.
 
-![Annotation View](assets\images\annotate.png)
+![Annotation View](assets/images/annotate.png)
 *The annotation canvas with a bounding box being drawn over an object, the class selector panel on the right, and the undo history visible in the sidebar.*
 
 ---
@@ -85,7 +85,7 @@ Surgical operations on your class list — no manual JSON editing required.
 - **Merge** — collapse multiple class names (e.g. `car`, `automobile`) into one
 - **Rename** — inline edit of any class name
 
-![Class Management View](assets\images\class_management.png)
+![Class Management View](assets/images/class_management.png)
 *The Class Management view showing a table of classes with annotation counts, colour swatches, and checkboxes for bulk extract/delete/merge operations.*
 
 ---
@@ -94,7 +94,7 @@ Surgical operations on your class list — no manual JSON editing required.
 
 Convert any supported format to any other. Optionally copy images alongside annotations, or annotations only. Train/val/test splits can be created during conversion with configurable ratios and optional stratification by class.
 
-![Convert View](assets\images\convert_format.png)
+![Convert View](assets/images/convert_format.png)
 *The Convert view with source format auto-detected as COCO, target format set to YOLO, and split ratio sliders set to 70/20/10.*
 
 ---
@@ -109,7 +109,7 @@ Build augmentation pipelines with a toggle-based UI, preview examples before com
 **Advanced:** mosaic (4-image combine), MixUp, CutOut  
 **Presets:** Light / Medium / Heavy — one click to configure common stacks
 
-![Augmentation View](assets\images\augmentation.png)
+![Augmentation View](assets/images/augmentation.png)
 *The Augmentation view with a pipeline configured — several transforms enabled with parameter sliders, the preview pane showing four augmented sample images.*
 
 ---
@@ -125,7 +125,7 @@ Turn video files into image datasets without external tools.
 
 Supports MP4, AVI, MOV, MKV, WebM. Output is a new dataset ready to annotate.
 
-![Video Extraction View](assets\images\frame_extraction.png)
+![Video Extraction View](assets/images/frame_extraction.png)
 *The Video Extraction view with a video loaded in the preview player, frame interval set to 15, and an estimated frame count shown before extraction starts.*
 
 ---
@@ -149,7 +149,7 @@ Configurable similarity threshold. Choose a keep strategy — first, largest res
 
 Combine multiple datasets into one, with a class-mapping UI to resolve naming conflicts between sources before merging.
 
-![Merge View](assets\images\merge_datasets.png)
+![Merge View](assets/images/merge_datasets.png)
 *The Merge view with two datasets added, a class conflict resolved via a mapping table (feline → cat, canine → dog), and the output format selector.*
 
 ---
@@ -177,7 +177,7 @@ Train object detection and segmentation models locally with real-time metric mon
 - Pause, resume, and stop with checkpoint saving
 - Export trained weights to PyTorch, ONNX, or TensorRT
 
-![Training View](assets\images\training_view.png)
+![Training View](assets/images/training_view.png)
 *The Training view mid-run — loss and accuracy charts updating live, GPU usage percentage shown, current epoch highlighted, and Pause/Stop controls visible.*
 
 ---
