@@ -1,0 +1,701 @@
+"""
+Training Module - Local model training with comprehensive logging
+"""
+
+import sys
+import threading
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Any, Optional
+
+# Capture sys.path at import time so daemon threads can find venv site-packages
+_VENV_SYSPATH = list(sys.path)
+
+
+def _restore_syspath():
+    for p in _VENV_SYSPATH:
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+
+# ── Device resolution ────────────────────────────────────────────────────────
+
+def _resolve_device(config: Dict, job: Dict) -> Any:
+    """Return the best available device (int, 'cpu', or 'mps')."""
+    pref = config.get("device", "auto")
+    if pref not in ("auto", ""):
+        job["logs"].append(f"Using user-specified device: {pref}")
+        return pref
+
+    # 1. torch.cuda
+    try:
+        import torch
+        if torch.cuda.is_available():
+            n = torch.cuda.device_count()
+            names = ", ".join(torch.cuda.get_device_name(i) for i in range(n))
+            job["logs"].append(f"CUDA available — {n} GPU(s): {names}")
+            job["device_info"] = names
+            return 0
+        else:
+            job["logs"].append("torch.cuda.is_available() = False (PyTorch may be CPU-only)")
+    except ImportError:
+        job["logs"].append("PyTorch not found")
+    except Exception as e:
+        job["logs"].append(f"CUDA check error: {e}")
+
+    # 2. nvidia-smi confirms GPU hardware present
+    try:
+        import subprocess
+        r = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=3)
+        if r.returncode == 0 and "GPU" in r.stdout:
+            lines = r.stdout.strip().splitlines()
+            job["logs"].append(f"GPU hardware detected by nvidia-smi: {lines[0]}")
+            job["logs"].append(
+                "⚠ Install CUDA-enabled PyTorch to use your GPU:\n"
+                "  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121\n"
+                "Falling back to CPU for this run."
+            )
+            job["device_info"] = lines[0]
+    except Exception:
+        pass
+
+    # 3. Apple MPS
+    try:
+        import torch
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            job["logs"].append("Using Apple MPS (Metal Performance Shaders)")
+            job["device_info"] = "Apple MPS"
+            return "mps"
+    except Exception:
+        pass
+
+    job["logs"].append("Using CPU (no GPU acceleration available)")
+    return "cpu"
+
+
+# ── Comprehensive callbacks ──────────────────────────────────────────────────
+
+def _make_callbacks(job: Dict) -> Dict:
+    """Create ultralytics callbacks that write structured metrics + human logs."""
+
+    def on_train_start(trainer):
+        device = str(getattr(trainer, "device", "unknown"))
+        job["logs"].append(f"Training started on device: {device}")
+        try:
+            import torch
+            if torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    name = torch.cuda.get_device_name(i)
+                    total = torch.cuda.get_device_properties(i).total_memory / 1e9
+                    job["logs"].append(f"  GPU {i}: {name}  ({total:.1f} GB total VRAM)")
+        except Exception:
+            pass
+        job["logs"].append(
+            f"{'Epoch':>6}  {'GPU-Mem':>8}  {'box_loss':>10}  {'cls_loss':>10}  "
+            f"{'dfl_loss':>10}  {'mAP50':>8}  {'mAP50-95':>10}  {'Speed':>10}"
+        )
+        job["logs"].append("─" * 90)
+
+    def on_fit_epoch_end(trainer):
+        epoch = trainer.epoch + 1
+        total = job["total_epochs"]
+        raw_metrics = dict(trainer.metrics) if trainer.metrics else {}
+
+        # ── Training losses ──────────────────────────────────────────────────
+        tloss = getattr(trainer, "tloss", None)
+        loss_names = list(getattr(trainer, "loss_names", []) or [])
+        losses: Dict[str, float] = {}
+
+        if tloss is not None:
+            try:
+                # tloss may be a tensor, list, or scalar
+                if hasattr(tloss, "__len__"):
+                    for i, name in enumerate(loss_names):
+                        try:
+                            losses[name] = float(tloss[i])
+                        except Exception:
+                            pass
+                else:
+                    losses["total"] = float(tloss)
+            except Exception:
+                pass
+
+        box_loss = losses.get("box_loss", losses.get("box", 0.0)) or 0.0
+        cls_loss = losses.get("cls_loss", losses.get("cls", 0.0)) or 0.0
+        dfl_loss = losses.get("dfl_loss", losses.get("dfl", 0.0)) or 0.0
+        seg_loss = losses.get("seg_loss", losses.get("seg", 0.0)) or 0.0
+
+        # ── Val losses ───────────────────────────────────────────────────────
+        val_box = float(raw_metrics.get("val/box_loss", 0) or 0)
+        val_cls = float(raw_metrics.get("val/cls_loss", 0) or 0)
+        val_dfl = float(raw_metrics.get("val/dfl_loss", 0) or 0)
+        val_seg = float(raw_metrics.get("val/seg_loss", 0) or 0)
+
+        # ── mAP / P / R ──────────────────────────────────────────────────────
+        mAP50     = float(raw_metrics.get("metrics/mAP50(B)",    0) or 0)
+        mAP50_95  = float(raw_metrics.get("metrics/mAP50-95(B)", 0) or 0)
+        mAP50_seg = float(raw_metrics.get("metrics/mAP50(M)",    0) or 0)
+        precision = float(raw_metrics.get("metrics/precision(B)", 0) or 0)
+        recall    = float(raw_metrics.get("metrics/recall(B)",    0) or 0)
+
+        # ── Speed ─────────────────────────────────────────────────────────────
+        speed = dict(getattr(trainer, "speed", {}) or {})
+        pre_ms  = float(speed.get("preprocess",  0) or 0)
+        inf_ms  = float(speed.get("inference",   0) or 0)
+        loss_ms = float(speed.get("loss",        0) or 0)
+        post_ms = float(speed.get("postprocess", 0) or 0)
+        total_ms = pre_ms + inf_ms + loss_ms + post_ms
+
+        # ── GPU memory ────────────────────────────────────────────────────────
+        gpu_mem_gb: Optional[float] = None
+        gpu_mem_str = ""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_mem_gb = torch.cuda.memory_reserved(0) / 1e9
+                gpu_mem_str = f"{gpu_mem_gb:.2f}G"
+                job["gpu_mem_gb"] = round(gpu_mem_gb, 2)
+        except Exception:
+            pass
+
+        # ── Instance count ────────────────────────────────────────────────────
+        batch = getattr(trainer, "batch", None)
+        inst_count = 0
+        if isinstance(batch, dict):
+            cls_tensor = batch.get("cls")
+            if cls_tensor is not None:
+                try:
+                    inst_count = int(len(cls_tensor))
+                except Exception:
+                    pass
+
+        # ── Human-readable log line ───────────────────────────────────────────
+        epoch_line = (
+            f"{epoch:>4}/{total:<4}  "
+            f"{gpu_mem_str:>8}  "
+            f"{box_loss:>10.4f}  {cls_loss:>10.4f}  {dfl_loss:>10.4f}  "
+            f"{mAP50:>8.4f}  {mAP50_95:>10.4f}  "
+            f"{total_ms:>8.1f}ms"
+        )
+        job["logs"].append(epoch_line)
+
+        if val_box > 0 or mAP50 > 0:
+            val_line = (
+                f"  {'Val':>8}  {' ':>8}  "
+                f"{val_box:>10.4f}  {val_cls:>10.4f}  {val_dfl:>10.4f}  "
+                f"{mAP50:>8.4f}  {mAP50_95:>10.4f}"
+            )
+            if precision > 0:
+                val_line += f"  P:{precision:.3f}  R:{recall:.3f}"
+            job["logs"].append(val_line)
+
+        if total_ms > 0:
+            job["logs"].append(
+                f"  Speed — pre:{pre_ms:.1f}ms  inf:{inf_ms:.1f}ms  "
+                f"loss:{loss_ms:.1f}ms  post:{post_ms:.1f}ms  "
+                + (f"inst:{inst_count}" if inst_count else "")
+            )
+
+        # ── Structured epoch record for charting ──────────────────────────────
+        record: Dict[str, Any] = {
+            "epoch":           epoch,
+            "train_box_loss":  round(box_loss,   5),
+            "train_cls_loss":  round(cls_loss,   5),
+            "train_dfl_loss":  round(dfl_loss,   5),
+            "val_box_loss":    round(val_box,     5),
+            "val_cls_loss":    round(val_cls,     5),
+            "val_dfl_loss":    round(val_dfl,     5),
+            "mAP50":           round(mAP50,       5),
+            "mAP50_95":        round(mAP50_95,    5),
+            "precision":       round(precision,   5),
+            "recall":          round(recall,      5),
+            "speed_ms":        round(total_ms,    2),
+        }
+        if seg_loss > 0:
+            record["train_seg_loss"] = round(seg_loss, 5)
+        if val_seg > 0:
+            record["val_seg_loss"] = round(val_seg, 5)
+        if mAP50_seg > 0:
+            record["mAP50_seg"] = round(mAP50_seg, 5)
+        if gpu_mem_gb is not None:
+            record["gpu_mem_gb"] = round(gpu_mem_gb, 2)
+
+        job["epoch_history"].append(record)
+        job["metrics"]       = record
+        job["progress"]      = epoch / total * 100
+        job["current_epoch"] = epoch
+
+    def on_train_end(trainer):
+        job["logs"].append("─" * 90)
+        job["logs"].append("Training finished.")
+        try:
+            if hasattr(trainer, "best") and trainer.best:
+                job["logs"].append(f"Best weights: {trainer.best}")
+        except Exception:
+            pass
+
+    return {
+        "on_train_start":   on_train_start,
+        "on_fit_epoch_end": on_fit_epoch_end,
+        "on_train_end":     on_train_end,
+    }
+
+
+# ── Training manager ─────────────────────────────────────────────────────────
+
+class TrainingManager:
+    """Manage local model training"""
+
+    def __init__(self):
+        self.training_jobs:    Dict[str, Dict[str, Any]] = {}
+        self.training_threads: Dict[str, threading.Thread] = {}
+
+    def start_training(
+        self,
+        dataset_path: Path,
+        format_name: str,
+        model_type: str,
+        config: Dict[str, Any],
+    ) -> str:
+        training_id = str(uuid.uuid4())[:8]
+
+        job: Dict[str, Any] = {
+            "id":            training_id,
+            "dataset_path":  str(dataset_path),
+            "format":        format_name,
+            "model_type":    model_type,
+            "config":        config,
+            "status":        "starting",
+            "progress":      0,
+            "current_epoch": 0,
+            "total_epochs":  config.get("epochs", 100),
+            "metrics":       {},
+            "epoch_history": [],
+            "started_at":    datetime.now().isoformat(),
+            "model_path":    None,
+            "device_info":   None,
+            "gpu_mem_gb":    None,
+            "logs":          [],
+        }
+
+        self.training_jobs[training_id] = job
+
+        thread = threading.Thread(target=self._run_training, args=(training_id,), daemon=True)
+        thread.start()
+        self.training_threads[training_id] = thread
+
+        return training_id
+
+    def _run_training(self, training_id: str):
+        _restore_syspath()
+        job = self.training_jobs[training_id]
+        try:
+            mt = job["model_type"]
+            if mt == "rfdetr":
+                self._train_rfdetr(job)
+            elif mt == "segmentation":
+                self._train_segmentation(job)
+            elif mt == "classification":
+                self._train_classification(job)
+            else:
+                self._train_yolo(job)
+        except Exception as e:
+            job["status"] = "failed"
+            job["error"]  = str(e)
+            job["logs"].append(f"Fatal error: {e}")
+
+    # ── RF-DETR ───────────────────────────────────────────────────────────────
+
+    def _train_rfdetr(self, job: Dict):
+        import subprocess
+        try:
+            import rfdetr as _rfdetr_pkg  # noqa: F401
+        except ImportError:
+            job["logs"].append("Installing rfdetr…")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "rfdetr", "-q"])
+
+        from rfdetr import RFDETRBase, RFDETRLarge
+
+        job["status"] = "running"
+        config       = job["config"]
+        dataset_path = Path(job["dataset_path"])
+
+        # RF-DETR requires a COCO-format dataset.
+        # Detect the dataset root by looking for a COCO annotations JSON.
+        coco_json = self._find_coco_json(dataset_path, job)
+        if coco_json is None:
+            return  # error already set inside _find_coco_json
+
+        device = _resolve_device(config, job)
+
+        arch = config.get("base_model", "rfdetr_base")
+        job["logs"].append(f"RF-DETR architecture: {arch}")
+        job["logs"].append(f"Dataset (COCO): {dataset_path}")
+
+        output_dir = dataset_path / "runs" / f"rfdetr_{job['id']}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        if "large" in arch:
+            model = RFDETRLarge()
+            job["logs"].append("Loaded RF-DETR Large backbone")
+        else:
+            model = RFDETRBase()
+            job["logs"].append("Loaded RF-DETR Base backbone")
+
+        epochs    = config.get("epochs", 50)
+        batch     = config.get("batch_size", 4)
+        lr        = config.get("lr0", 1e-4)
+        grad_acc  = max(1, 16 // max(batch, 1))  # accumulate to effective batch 16
+        job["total_epochs"] = epochs
+        job["logs"].append(f"Epochs: {epochs}  Batch: {batch}  LR: {lr}  GradAcc: {grad_acc}")
+
+        # Build RF-DETR callbacks that feed the standard job metrics dict
+        rfdetr_job_ref = job  # capture for closure
+
+        def on_fit_epoch_end(logs: dict):
+            epoch      = int(logs.get("epoch", rfdetr_job_ref["current_epoch"] + 1))
+            map50      = float(logs.get("mAP50",    logs.get("map50",    0)) or 0)
+            map50_95   = float(logs.get("mAP50_95", logs.get("map",      0)) or 0)
+            train_loss = float(logs.get("train_loss", logs.get("loss",   0)) or 0)
+            val_loss   = float(logs.get("val_loss",   0) or 0)
+
+            gpu_mem_gb: Optional[float] = None
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    gpu_mem_gb = torch.cuda.memory_reserved(0) / 1e9
+                    rfdetr_job_ref["gpu_mem_gb"] = round(gpu_mem_gb, 2)
+            except Exception:
+                pass
+
+            log_line = (
+                f"{epoch:>4}/{epochs:<4}  "
+                f"{'%.2fG' % gpu_mem_gb if gpu_mem_gb else '':>8}  "
+                f"loss: {train_loss:.4f}  val_loss: {val_loss:.4f}  "
+                f"mAP50: {map50:.4f}  mAP50-95: {map50_95:.4f}"
+            )
+            rfdetr_job_ref["logs"].append(log_line)
+
+            record: Dict[str, Any] = {
+                "epoch":          epoch,
+                "train_box_loss": round(train_loss, 5),
+                "train_cls_loss": 0.0,
+                "train_dfl_loss": 0.0,
+                "val_box_loss":   round(val_loss,   5),
+                "val_cls_loss":   0.0,
+                "val_dfl_loss":   0.0,
+                "mAP50":          round(map50,      5),
+                "mAP50_95":       round(map50_95,   5),
+                "precision":      float(logs.get("precision", 0) or 0),
+                "recall":         float(logs.get("recall",    0) or 0),
+                "speed_ms":       0.0,
+            }
+            if gpu_mem_gb is not None:
+                record["gpu_mem_gb"] = round(gpu_mem_gb, 2)
+
+            rfdetr_job_ref["epoch_history"].append(record)
+            rfdetr_job_ref["metrics"]       = record
+            rfdetr_job_ref["progress"]      = epoch / epochs * 100
+            rfdetr_job_ref["current_epoch"] = epoch
+
+        try:
+            model.train(
+                dataset_dir=str(dataset_path),
+                epochs=epochs,
+                batch_size=batch,
+                grad_accum_steps=grad_acc,
+                lr=lr,
+                output_dir=str(output_dir),
+                callbacks={"on_fit_epoch_end": on_fit_epoch_end},
+            )
+            # RF-DETR saves checkpoint as checkpoint.pth in output_dir
+            best_ckpt = output_dir / "checkpoint_best_total.pth"
+            if not best_ckpt.exists():
+                # fallback to any .pth
+                ptfiles = list(output_dir.glob("*.pth"))
+                best_ckpt = ptfiles[0] if ptfiles else None
+
+            job["status"]     = "completed"
+            job["progress"]   = 100
+            job["model_path"] = str(best_ckpt) if best_ckpt else None
+            job["logs"].append("✓ RF-DETR training complete")
+            if best_ckpt:
+                job["logs"].append(f"Weights saved: {best_ckpt}")
+        except Exception as e:
+            job["status"] = "failed"
+            job["error"]  = str(e)
+            job["logs"].append(f"RF-DETR training error: {e}")
+
+    @staticmethod
+    def _find_coco_json(dataset_path: Path, job: Dict) -> Optional[Path]:
+        """Locate a COCO-format annotations JSON file. Returns None and sets job error if not found."""
+        # Common COCO layouts: annotations/instances_train2017.json, _annotations.coco.json, etc.
+        candidates: List[Path] = (
+            list(dataset_path.rglob("*instances_train*.json")) +
+            list(dataset_path.rglob("*_annotations.coco.json")) +
+            list(dataset_path.rglob("annotations/*.json")) +
+            list(dataset_path.rglob("*.json"))
+        )
+        for p in candidates:
+            if p.stat().st_size < 100:
+                continue
+            try:
+                import json as _json
+                with open(p) as f:
+                    data = _json.load(f)
+                if "images" in data and "annotations" in data and "categories" in data:
+                    job["logs"].append(f"COCO annotations: {p}")
+                    return p
+            except Exception:
+                continue
+        job["status"] = "failed"
+        job["error"]  = (
+            "No COCO-format annotations JSON found. "
+            "RF-DETR training requires a COCO dataset. "
+            "Use Convert to transform your dataset to COCO format first."
+        )
+        job["logs"].append(job["error"])
+        return None
+
+    # ── YOLO detection ────────────────────────────────────────────────────────
+
+    def _train_yolo(self, job: Dict):
+        try:
+            from ultralytics import YOLO
+        except ImportError:
+            import subprocess
+            job["logs"].append("Installing ultralytics…")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "ultralytics", "-q"])
+            from ultralytics import YOLO
+
+        job["status"] = "running"
+        config        = job["config"]
+        dataset_path  = Path(job["dataset_path"])
+
+        data_yaml = self._find_yaml(dataset_path, job)
+        if not data_yaml:
+            return
+
+        device = _resolve_device(config, job)
+
+        arch = config.get("base_model", "yolov8n.pt")
+        job["logs"].append(f"Base model: {arch}")
+
+        model = YOLO(arch)
+        cbs = _make_callbacks(job)
+        for name, fn in cbs.items():
+            model.add_callback(name, fn)
+
+        output_dir = dataset_path / "runs" / f"train_{job['id']}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            results = model.train(
+                data=str(data_yaml),
+                epochs=config.get("epochs", 100),
+                batch=config.get("batch_size", 16),
+                imgsz=config.get("image_size", 640),
+                device=device,
+                project=str(output_dir),
+                name="train",
+                exist_ok=True,
+                verbose=False,
+                # advanced hypers
+                lr0=config.get("lr0", 0.01),
+                lrf=config.get("lrf", 0.01),
+                optimizer=config.get("optimizer", "SGD"),
+                patience=config.get("patience", 50),
+                cos_lr=config.get("cos_lr", False),
+                warmup_epochs=config.get("warmup_epochs", 3),
+                weight_decay=config.get("weight_decay", 0.0005),
+                mosaic=config.get("mosaic", 1.0),
+                hsv_h=config.get("hsv_h", 0.015),
+                hsv_s=config.get("hsv_s", 0.7),
+                hsv_v=config.get("hsv_v", 0.4),
+                flipud=config.get("flipud", 0.0),
+                fliplr=config.get("fliplr", 0.5),
+                amp=config.get("amp", True),
+                dropout=config.get("dropout", 0.0),
+            )
+            job["status"]     = "completed"
+            job["progress"]   = 100
+            job["model_path"] = str(output_dir / "train" / "weights" / "best.pt")
+            job["logs"].append("✓ Detection training complete")
+            if hasattr(results, "results_dict"):
+                job["metrics"].update(results.results_dict)
+        except Exception as e:
+            job["status"] = "failed"
+            job["error"]  = str(e)
+            job["logs"].append(f"Training error: {e}")
+
+    # ── Segmentation ──────────────────────────────────────────────────────────
+
+    def _train_segmentation(self, job: Dict):
+        try:
+            from ultralytics import YOLO
+        except ImportError:
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "ultralytics", "-q"])
+            from ultralytics import YOLO
+
+        job["status"] = "running"
+        config        = job["config"]
+        dataset_path  = Path(job["dataset_path"])
+
+        data_yaml = self._find_yaml(dataset_path, job)
+        if not data_yaml:
+            return
+
+        device = _resolve_device(config, job)
+
+        arch = config.get("base_model", "yolov8n-seg.pt")
+        job["logs"].append(f"Base model: {arch}")
+
+        model = YOLO(arch)
+        cbs = _make_callbacks(job)
+        for name, fn in cbs.items():
+            model.add_callback(name, fn)
+
+        output_dir = dataset_path / "runs" / f"segment_{job['id']}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            results = model.train(
+                data=str(data_yaml),
+                epochs=config.get("epochs", 100),
+                batch=config.get("batch_size", 16),
+                imgsz=config.get("image_size", 640),
+                device=device,
+                project=str(output_dir),
+                name="train",
+                exist_ok=True,
+                verbose=False,
+                lr0=config.get("lr0", 0.01),
+                lrf=config.get("lrf", 0.01),
+                optimizer=config.get("optimizer", "SGD"),
+                patience=config.get("patience", 50),
+                weight_decay=config.get("weight_decay", 0.0005),
+                amp=config.get("amp", True),
+            )
+            job["status"]     = "completed"
+            job["progress"]   = 100
+            job["model_path"] = str(output_dir / "train" / "weights" / "best.pt")
+            job["logs"].append("✓ Segmentation training complete")
+        except Exception as e:
+            job["status"] = "failed"
+            job["error"]  = str(e)
+            job["logs"].append(f"Training error: {e}")
+
+    # ── Classification ────────────────────────────────────────────────────────
+
+    def _train_classification(self, job: Dict):
+        try:
+            from ultralytics import YOLO
+        except ImportError:
+            import subprocess
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "ultralytics", "-q"])
+            from ultralytics import YOLO
+
+        job["status"] = "running"
+        config        = job["config"]
+        dataset_path  = Path(job["dataset_path"])
+        device        = _resolve_device(config, job)
+
+        arch = config.get("base_model", "yolov8n-cls.pt")
+        job["logs"].append(f"Base model: {arch}")
+
+        model = YOLO(arch)
+        cbs = _make_callbacks(job)
+        for name, fn in cbs.items():
+            model.add_callback(name, fn)
+
+        output_dir = dataset_path / "runs" / f"classify_{job['id']}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            model.train(
+                data=str(dataset_path),
+                epochs=config.get("epochs", 100),
+                batch=config.get("batch_size", 16),
+                imgsz=config.get("image_size", 224),
+                device=device,
+                project=str(output_dir),
+                name="train",
+                exist_ok=True,
+                verbose=False,
+            )
+            job["status"]     = "completed"
+            job["progress"]   = 100
+            job["model_path"] = str(output_dir / "train" / "weights" / "best.pt")
+            job["logs"].append("✓ Classification training complete")
+        except Exception as e:
+            job["status"] = "failed"
+            job["error"]  = str(e)
+            job["logs"].append(f"Training error: {e}")
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _find_yaml(dataset_path: Path, job: Dict) -> Optional[Path]:
+        data_yaml = None
+        for candidate in list(dataset_path.rglob("data.yaml")) + list(dataset_path.rglob("*.yaml")):
+            if candidate.name.startswith("."):
+                continue
+            data_yaml = candidate
+            if candidate.name == "data.yaml":
+                break
+        if not data_yaml:
+            job["status"] = "failed"
+            job["error"]  = "No data.yaml found — use the YAML Wizard to create one"
+            job["logs"].append(job["error"])
+        else:
+            job["logs"].append(f"Data config: {data_yaml}")
+        return data_yaml
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def get_status(self, training_id: str) -> Optional[Dict[str, Any]]:
+        if training_id not in self.training_jobs:
+            return None
+        job = self.training_jobs[training_id]
+        return {
+            "id":            job["id"],
+            "status":        job["status"],
+            "progress":      job["progress"],
+            "current_epoch": job["current_epoch"],
+            "total_epochs":  job["total_epochs"],
+            "metrics":       job["metrics"],
+            "epoch_history": job.get("epoch_history", []),
+            "started_at":    job["started_at"],
+            "model_path":    job["model_path"],
+            "device_info":   job.get("device_info"),
+            "gpu_mem_gb":    job.get("gpu_mem_gb"),
+            "logs":          job["logs"][-50:],
+            "error":         job.get("error"),
+        }
+
+    def stop_training(self, training_id: str) -> bool:
+        if training_id not in self.training_jobs:
+            return False
+        job = self.training_jobs[training_id]
+        job["status"] = "stopped"
+        job["logs"].append("Training stopped by user")
+        return True
+
+    def get_model_path(self, training_id: str) -> Optional[str]:
+        if training_id not in self.training_jobs:
+            return None
+        return self.training_jobs[training_id].get("model_path")
+
+    def list_training_jobs(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "id":         job["id"],
+                "status":     job["status"],
+                "progress":   job["progress"],
+                "model_type": job["model_type"],
+                "started_at": job["started_at"],
+            }
+            for job in self.training_jobs.values()
+        ]
