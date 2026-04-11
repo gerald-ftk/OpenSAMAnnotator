@@ -38,14 +38,32 @@ export function SnapshotView({ selectedDataset, datasets, setDatasets, apiUrl }:
   const [snapshotDesc, setSnapshotDesc] = useState('')
   const [isLoading, setIsLoading] = useState(false)
 
-  // Load snapshots from localStorage (client-side versioning)
-  useEffect(() => {
-    if (!selectedDataset) return
-    const stored = localStorage.getItem(`snapshots_${selectedDataset.id}`)
+  // Load snapshots from backend (with localStorage fallback for locally-created ones)
+  const loadSnapshots = async (datasetId: string) => {
+    setIsLoading(true)
+    try {
+      const res = await fetch(`${apiUrl}/api/datasets/${datasetId}/snapshots`)
+      if (res.ok) {
+        const data = await res.json()
+        setSnapshots(data.snapshots || [])
+        // Persist to localStorage so they're available offline
+        localStorage.setItem(`snapshots_${datasetId}`, JSON.stringify(data.snapshots || []))
+        setIsLoading(false)
+        return
+      }
+    } catch {}
+    // Fallback: load from localStorage
+    const stored = localStorage.getItem(`snapshots_${datasetId}`)
     if (stored) {
       try { setSnapshots(JSON.parse(stored)) } catch {}
     }
-  }, [selectedDataset?.id])
+    setIsLoading(false)
+  }
+
+  useEffect(() => {
+    if (!selectedDataset) return
+    loadSnapshots(selectedDataset.id)
+  }, [selectedDataset?.id, apiUrl])
 
   const saveSnapshots = (snaps: Snapshot[]) => {
     if (!selectedDataset) return
@@ -58,50 +76,43 @@ export function SnapshotView({ selectedDataset, datasets, setDatasets, apiUrl }:
     if (!snapshotName.trim()) { toast.error('Enter a snapshot name'); return }
     setIsCreating(true)
     try {
-      // Call backend to create a zip export of current state
-      const snapshot: Snapshot = {
-        id: `snap_${Date.now()}`,
-        name: snapshotName.trim(),
-        dataset_id: selectedDataset.id,
-        created_at: new Date().toISOString(),
-        num_images: selectedDataset.num_images,
-        num_annotations: selectedDataset.num_annotations,
-        description: snapshotDesc.trim() || `Snapshot of ${selectedDataset.name}`,
+      const res = await fetch(`${apiUrl}/api/datasets/${selectedDataset.id}/snapshot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: snapshotName.trim(), description: snapshotDesc.trim() })
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Snapshot failed' }))
+        throw new Error(err.detail || 'Failed to create snapshot')
       }
-
-      // Try to hit an endpoint to actually save — fall back to local record only
-      try {
-        const res = await fetch(`${apiUrl}/api/datasets/${selectedDataset.id}/snapshot`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: snapshotName, description: snapshotDesc })
-        })
-        if (res.ok) {
-          const data = await res.json()
-          snapshot.id = data.snapshot_id || snapshot.id
-          snapshot.size_mb = data.size_mb
-        }
-      } catch {
-        // Backend doesn't have this endpoint yet — record locally
-      }
-
-      const updated = [snapshot, ...snapshots]
-      saveSnapshots(updated)
       setSnapshotName('')
       setSnapshotDesc('')
-      toast.success(`Snapshot "${snapshot.name}" created`)
+      toast.success(`Snapshot "${snapshotName.trim()}" created`)
+      // Reload from backend to get the accurate list
+      await loadSnapshots(selectedDataset.id)
     } catch (e) {
-      toast.error('Failed to create snapshot')
+      toast.error(e instanceof Error ? e.message : 'Failed to create snapshot')
     } finally {
       setIsCreating(false)
     }
   }
 
-  const deleteSnapshot = (id: string) => {
-    if (!confirm('Delete this snapshot?')) return
-    const updated = snapshots.filter(s => s.id !== id)
-    saveSnapshots(updated)
-    toast.success('Snapshot deleted')
+  const deleteSnapshot = async (snap: Snapshot) => {
+    if (!confirm('Delete this snapshot? The zip file will be permanently removed.')) return
+    try {
+      const res = await fetch(`${apiUrl}/api/datasets/${snap.dataset_id}/snapshot/${snap.id}`, {
+        method: 'DELETE'
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Delete failed' }))
+        throw new Error(err.detail)
+      }
+      const updated = snapshots.filter(s => s.id !== snap.id)
+      saveSnapshots(updated)
+      toast.success('Snapshot deleted')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to delete snapshot')
+    }
   }
 
   const downloadSnapshot = async (snap: Snapshot) => {
@@ -258,7 +269,7 @@ export function SnapshotView({ selectedDataset, datasets, setDatasets, apiUrl }:
                       <RefreshCw className="w-3.5 h-3.5" />
                       Restore
                     </Button>
-                    <Button size="sm" variant="ghost" className="h-7 text-destructive hover:text-destructive" onClick={() => deleteSnapshot(snap.id)}>
+                    <Button size="sm" variant="ghost" className="h-7 text-destructive hover:text-destructive" onClick={() => deleteSnapshot(snap)}>
                       <Trash2 className="w-3.5 h-3.5" />
                     </Button>
                   </div>
@@ -276,9 +287,9 @@ export function SnapshotView({ selectedDataset, datasets, setDatasets, apiUrl }:
           <div className="text-sm">
             <p className="font-medium text-blue-600 dark:text-blue-400">About Snapshots</p>
             <p className="text-muted-foreground mt-1">
-              Snapshots record the state of your dataset at a point in time. They're stored locally in your browser.
-              Click <strong>Export</strong> to download a full zip archive of the dataset for true off-site backup.
-              Restore calls the backend if supported, otherwise exports the snapshot for manual re-import.
+              Snapshots are full zip archives of your dataset saved to <code className="text-xs bg-muted px-1 rounded">workspace/snapshots/</code> on the backend.
+              They persist across restarts and browser changes. Click <strong>Export</strong> to download a snapshot zip.
+              Click <strong>Restore</strong> to revert the dataset to the saved state.
             </p>
           </div>
         </CardContent>

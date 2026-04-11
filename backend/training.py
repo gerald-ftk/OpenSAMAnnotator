@@ -98,6 +98,20 @@ def _make_callbacks(job: Dict) -> Dict:
         job["logs"].append("─" * 90)
 
     def on_fit_epoch_end(trainer):
+        # Store trainer reference so stop/pause can signal it
+        job["_trainer"] = trainer
+
+        # Check stop/pause flag — stops after current epoch completes
+        if job.get("_stop_requested"):
+            # Save last checkpoint path before stopping
+            project = Path(getattr(trainer, "save_dir", "") or "")
+            last_pt = project / "weights" / "last.pt"
+            if last_pt.exists():
+                job["last_checkpoint"] = str(last_pt)
+            if not job.get("model_path") and last_pt.exists():
+                job["model_path"] = str(last_pt)
+            trainer.stop = True  # ultralytics flag to stop after epoch
+
         epoch = trainer.epoch + 1
         total = job["total_epochs"]
         raw_metrics = dict(trainer.metrics) if trainer.metrics else {}
@@ -298,6 +312,9 @@ class TrainingManager:
                 self._train_segmentation(job)
             elif mt == "classification":
                 self._train_classification(job)
+            elif mt == "rtdetr":
+                # RT-DETR from ultralytics is trained via the YOLO class
+                self._train_yolo(job)
             else:
                 self._train_yolo(job)
         except Exception as e:
@@ -679,9 +696,108 @@ class TrainingManager:
         if training_id not in self.training_jobs:
             return False
         job = self.training_jobs[training_id]
+        job["_stop_requested"] = True
         job["status"] = "stopped"
-        job["logs"].append("Training stopped by user")
+        job["logs"].append("Training stopped by user — waiting for current epoch to finish.")
+        # Also try to set trainer.stop directly if trainer is accessible
+        trainer = job.get("_trainer")
+        if trainer is not None:
+            try:
+                trainer.stop = True
+            except Exception:
+                pass
         return True
+
+    def pause_training(self, training_id: str) -> bool:
+        """Stop training after current epoch and mark as paused (checkpoint saved)."""
+        if training_id not in self.training_jobs:
+            return False
+        job = self.training_jobs[training_id]
+        if job.get("status") not in ("running", "starting"):
+            return False
+        job["_stop_requested"] = True
+        job["status"] = "paused"
+        job["logs"].append("Pause requested — training will stop after this epoch and save a checkpoint.")
+        trainer = job.get("_trainer")
+        if trainer is not None:
+            try:
+                trainer.stop = True
+            except Exception:
+                pass
+        return True
+
+    def resume_training(self, training_id: str) -> Optional[str]:
+        """Resume a paused training job from the last saved checkpoint."""
+        if training_id not in self.training_jobs:
+            return None
+        job = self.training_jobs[training_id]
+        if job.get("status") != "paused":
+            return None
+
+        last_checkpoint = job.get("last_checkpoint") or job.get("model_path")
+        if not last_checkpoint or not Path(last_checkpoint).exists():
+            # Try to find last.pt in a known location
+            dataset_path = Path(job["dataset_path"])
+            job_id = job["id"]
+            for pattern in [f"runs/train_{job_id}/train/weights/last.pt",
+                             f"runs/segment_{job_id}/train/weights/last.pt",
+                             f"runs/classify_{job_id}/train/weights/last.pt"]:
+                candidate = dataset_path / pattern
+                if candidate.exists():
+                    last_checkpoint = str(candidate)
+                    break
+
+        if not last_checkpoint:
+            return None
+
+        # Clear stop flag, reset to running
+        job["_stop_requested"] = False
+        job["_trainer"] = None
+        job["status"] = "running"
+        job["logs"].append(f"Resuming from checkpoint: {last_checkpoint}")
+
+        # Start a new thread that resumes training
+        mt = job["model_type"]
+        if mt == "rfdetr":
+            job["logs"].append("RF-DETR does not support checkpoint resume — cannot resume.")
+            job["status"] = "paused"
+            return None
+
+        def _resume():
+            _restore_syspath()
+            try:
+                from ultralytics import YOLO
+                model = YOLO(last_checkpoint)
+                model.train(resume=True)
+                job["status"] = "completed"
+                job["progress"] = 100
+                job["logs"].append("✓ Training resumed and completed.")
+            except Exception as e:
+                job["status"] = "failed"
+                job["error"] = str(e)
+                job["logs"].append(f"Resume error: {e}")
+
+        thread = threading.Thread(target=_resume, daemon=True)
+        thread.start()
+        self.training_threads[training_id] = thread
+        return training_id
+
+    def export_model_format(self, training_id: str, fmt: str) -> Optional[str]:
+        """Export a trained model to the given format (onnx, tflite, coreml, engine)."""
+        if training_id not in self.training_jobs:
+            return None
+        job = self.training_jobs[training_id]
+        model_path = job.get("model_path")
+        if not model_path or not Path(model_path).exists():
+            return None
+        try:
+            from ultralytics import YOLO
+            model = YOLO(model_path)
+            exported = model.export(format=fmt)
+            return str(exported)
+        except Exception as e:
+            job["logs"].append(f"Export to {fmt} failed: {e}")
+            return None
 
     def get_model_path(self, training_id: str) -> Optional[str]:
         if training_id not in self.training_jobs:

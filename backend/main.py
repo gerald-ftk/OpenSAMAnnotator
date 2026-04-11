@@ -317,8 +317,8 @@ class MergeRequest(BaseModel):
 
 class TrainingConfig(BaseModel):
     dataset_id: str
-    model_type: str  # "yolo" | "segmentation" | "classification" | "rfdetr"
-    model_arch: str = "yolov8n"   # e.g. yolov8n, yolov8s, rfdetr_base, rfdetr_large
+    model_type: str  # "yolo" | "segmentation" | "classification" | "rfdetr" | "rtdetr"
+    model_arch: str = "yolov8n"   # e.g. yolov8n, yolo11n, yolov9c, rtdetr-l, rfdetr_base
     epochs: int = 100
     batch_size: int = 16
     image_size: int = 640
@@ -1458,9 +1458,12 @@ async def auto_annotate_text_batch(
         "failed": 0,
         "total_annotations": 0,  # total annotation objects created
         "dataset_id": dataset_id,
+        "model_id": model_id,
+        "confidence_threshold": confidence_threshold,
         "text_prompt": text_prompt,
         "started_at": datetime.utcnow().isoformat(),
         "recent_images": [],     # last 10 processed images for live preview
+        "all_images": [],        # all processed images with annotations
     }
     _job_controls[job_id] = {"pause": pause_ev, "stop": stop_ev}
     _persist_jobs()
@@ -1526,15 +1529,20 @@ async def auto_annotate_text_batch(
                             rel_path = str(image_file.relative_to(dataset_path))
                         except Exception:
                             rel_path = image_file.name
-                        recent = _text_annotate_jobs[job_id].get("recent_images", [])
-                        recent.append({
+                        img_entry = {
                             "filename": image_file.name,
                             "path": rel_path,
                             "abs_path": str(image_file),
                             "image_id": image_file.stem,
                             "annotation_count": len(annotations),
-                        })
+                        }
+                        recent = _text_annotate_jobs[job_id].get("recent_images", [])
+                        recent.append(img_entry)
                         _text_annotate_jobs[job_id]["recent_images"] = recent[-10:]
+                        # Track ALL processed images with annotations
+                        all_imgs = _text_annotate_jobs[job_id].get("all_images", [])
+                        all_imgs.append(img_entry)
+                        _text_annotate_jobs[job_id]["all_images"] = all_imgs
                         # Keep image list cache fresh so live polling returns new annotations
                         _images_cache.pop(dataset_id, None)
                     except Exception as exc:
@@ -1628,6 +1636,149 @@ async def list_batch_jobs():
     return {"jobs": list(_text_annotate_jobs.values())}
 
 
+@app.delete("/api/auto-annotate/text-batch/{job_id}")
+async def delete_batch_job(job_id: str):
+    """Permanently remove a finished/interrupted batch job from state."""
+    if job_id not in _text_annotate_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if _text_annotate_jobs[job_id]["status"] in ("running", "paused"):
+        raise HTTPException(status_code=400, detail="Cancel the job before deleting")
+    del _text_annotate_jobs[job_id]
+    _job_controls.pop(job_id, None)
+    _persist_jobs()
+    return {"status": "deleted"}
+
+
+@app.post("/api/auto-annotate/text-batch/{job_id}/restart")
+async def restart_text_batch(job_id: str):
+    """Continue an interrupted/cancelled/error batch job from where it left off."""
+    if job_id not in _text_annotate_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = _text_annotate_jobs[job_id]
+    if job["status"] not in ("interrupted", "cancelled", "error"):
+        raise HTTPException(status_code=400, detail="Job is not restartable")
+
+    dataset_id = job["dataset_id"]
+    model_id = job.get("model_id")
+    confidence_threshold = job.get("confidence_threshold", 0.5)
+    text_prompt = job["text_prompt"]
+
+    if not model_id:
+        raise HTTPException(status_code=400, detail="Job has no stored model_id; start a new job instead")
+    if dataset_id not in active_datasets:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    if model_id not in model_manager.loaded_models or not model_manager.loaded_models[model_id].get("model"):
+        model_manager._try_autoload(model_id)
+    if model_id not in model_manager.loaded_models or not model_manager.loaded_models[model_id].get("model"):
+        raise HTTPException(status_code=400, detail="Model not loaded or unavailable")
+
+    import threading as _threading
+    pause_ev = _threading.Event(); pause_ev.set()
+    stop_ev = _threading.Event()
+    _job_controls[job_id] = {"pause": pause_ev, "stop": stop_ev}
+    job["status"] = "running"
+    job["paused"] = False
+    _persist_jobs()
+
+    dataset = active_datasets[dataset_id]
+    dataset_path = DATASETS_DIR / dataset_id
+    already_done = {img["image_id"] for img in job.get("all_images", [])}
+
+    def _continue_batch(job_id: str):
+        try:
+            IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+            image_files = []
+            for ext in IMAGE_EXTENSIONS:
+                image_files.extend(dataset_path.rglob(f"*{ext}"))
+                image_files.extend(dataset_path.rglob(f"*{ext.upper()}"))
+            image_files = [f for f in image_files if "labels" not in f.parts]
+
+            all_count = len(image_files)
+            remaining = [f for f in image_files if f.stem not in already_done]
+            _text_annotate_jobs[job_id]["total"] = all_count
+            classes = model_manager._get_dataset_classes(dataset_path, dataset["format"])
+
+            ctrl = _job_controls[job_id]
+            for i, image_file in enumerate(remaining):
+                if ctrl["stop"].is_set():
+                    _text_annotate_jobs[job_id]["status"] = "cancelled"
+                    _images_cache.pop(dataset_id, None)
+                    return
+                if not ctrl["pause"].is_set():
+                    _text_annotate_jobs[job_id]["paused"] = True
+                    _text_annotate_jobs[job_id]["status"] = "paused"
+                    ctrl["pause"].wait()
+                    if ctrl["stop"].is_set():
+                        _text_annotate_jobs[job_id]["status"] = "cancelled"
+                        _images_cache.pop(dataset_id, None)
+                        return
+                    _text_annotate_jobs[job_id]["paused"] = False
+                    _text_annotate_jobs[job_id]["status"] = "running"
+
+                try:
+                    annotations = model_manager._run_inference(
+                        model_manager.loaded_models[model_id]["model"],
+                        model_manager.loaded_models[model_id]["type"],
+                        image_file,
+                        confidence_threshold,
+                        text_prompt=text_prompt,
+                    )
+                except Exception as exc:
+                    print(f"[batch:{job_id}] inference failed on {image_file.name}: {exc}")
+                    _text_annotate_jobs[job_id]["failed"] += 1
+                    _text_annotate_jobs[job_id]["processed"] += 1
+                    total_done = len(already_done) + i + 1
+                    _text_annotate_jobs[job_id]["progress"] = int(total_done / max(all_count, 1) * 100)
+                    continue
+
+                if annotations:
+                    try:
+                        model_manager._save_annotations(
+                            dataset_path, dataset["format"], image_file, annotations, classes
+                        )
+                        _text_annotate_jobs[job_id]["annotated"] += 1
+                        _text_annotate_jobs[job_id]["total_annotations"] += len(annotations)
+                        try:
+                            rel_path = str(image_file.relative_to(dataset_path))
+                        except Exception:
+                            rel_path = image_file.name
+                        img_entry = {
+                            "filename": image_file.name,
+                            "path": rel_path,
+                            "abs_path": str(image_file),
+                            "image_id": image_file.stem,
+                            "annotation_count": len(annotations),
+                        }
+                        recent = _text_annotate_jobs[job_id].get("recent_images", [])
+                        recent.append(img_entry)
+                        _text_annotate_jobs[job_id]["recent_images"] = recent[-10:]
+                        all_imgs = _text_annotate_jobs[job_id].get("all_images", [])
+                        all_imgs.append(img_entry)
+                        _text_annotate_jobs[job_id]["all_images"] = all_imgs
+                        _images_cache.pop(dataset_id, None)
+                    except Exception as exc:
+                        print(f"[batch:{job_id}] save failed on {image_file.name}: {exc}")
+                        _text_annotate_jobs[job_id]["failed"] += 1
+                _text_annotate_jobs[job_id]["processed"] += 1
+                total_done = len(already_done) + i + 1
+                _text_annotate_jobs[job_id]["progress"] = int(total_done / max(all_count, 1) * 100)
+                if i % 5 == 4:
+                    _persist_jobs()
+
+            _images_cache.pop(dataset_id, None)
+            _text_annotate_jobs[job_id]["status"] = "done"
+            _persist_jobs()
+        except Exception as e:
+            _text_annotate_jobs[job_id]["status"] = "error"
+            _text_annotate_jobs[job_id]["error"] = str(e)
+            _persist_jobs()
+
+    import threading
+    threading.Thread(target=_continue_batch, args=(job_id,), daemon=True).start()
+    return {"status": "running"}
+
+
 @app.get("/api/auto-annotate/text-batch/{job_id}/preview/{idx}")
 async def get_batch_job_preview_image(job_id: str, idx: int):
     """Serve a recently-processed image from a batch job for live preview."""
@@ -1640,6 +1791,199 @@ async def get_batch_job_preview_image(job_id: str, idx: int):
     if not abs_path or not Path(abs_path).exists():
         raise HTTPException(status_code=404, detail="Image file not found")
     return FileResponse(abs_path)
+
+
+@app.get("/api/auto-annotate/text-batch/{job_id}/processed-images")
+async def get_batch_job_all_images(job_id: str):
+    """Return all processed images for a batch job."""
+    if job_id not in _text_annotate_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    all_images = _text_annotate_jobs[job_id].get("all_images", [])
+    return {"images": all_images}
+
+
+@app.get("/api/auto-annotate/text-batch/{job_id}/image/{image_id}")
+async def get_batch_job_image_by_id(job_id: str, image_id: str):
+    """Serve a processed image by its image_id (filename stem)."""
+    if job_id not in _text_annotate_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    all_images = _text_annotate_jobs[job_id].get("all_images", [])
+    for img in all_images:
+        if img.get("image_id") == image_id:
+            abs_path = img.get("abs_path")
+            if abs_path and Path(abs_path).exists():
+                return FileResponse(abs_path)
+    raise HTTPException(status_code=404, detail="Image not found")
+
+
+@app.get("/api/auto-annotate/text-batch/{job_id}/annotated/{image_id}")
+async def get_batch_job_annotated_image(job_id: str, image_id: str):
+    """Serve an image with annotations drawn on it."""
+    import cv2
+    import numpy as np
+    
+    if job_id not in _text_annotate_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job = _text_annotate_jobs[job_id]
+    dataset_id = job.get("dataset_id")
+    if not dataset_id or dataset_id not in active_datasets:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    
+    all_images = job.get("all_images", [])
+    img_entry = None
+    for img in all_images:
+        if img.get("image_id") == image_id:
+            img_entry = img
+            break
+    
+    if not img_entry:
+        raise HTTPException(status_code=404, detail="Image not found in job")
+    
+    abs_path = img_entry.get("abs_path")
+    if not abs_path or not Path(abs_path).exists():
+        raise HTTPException(status_code=404, detail="Image file not found")
+    
+    # Load the image
+    img = cv2.imread(abs_path)
+    if img is None:
+        raise HTTPException(status_code=500, detail="Failed to load image")
+    
+    h, w = img.shape[:2]
+    
+    # Get annotations for this image
+    dataset = active_datasets[dataset_id]
+    dataset_path = DATASETS_DIR / dataset_id
+    classes = model_manager._get_dataset_classes(dataset_path, dataset["format"])
+    
+    # Generate distinct colors for classes
+    def get_class_color(idx):
+        colors = [
+            (0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), 
+            (255, 0, 255), (0, 255, 255), (255, 128, 0), (128, 0, 255),
+            (0, 128, 255), (128, 255, 0), (255, 0, 128), (0, 255, 128)
+        ]
+        return colors[idx % len(colors)]
+    
+    # Find and draw annotations
+    rel_path = img_entry.get("path", "")
+    image_file = Path(abs_path)
+    
+    # Try to find the label file
+    label_file = None
+    if dataset["format"] == "yolo":
+        # YOLO datasets typically have parallel images/labels folders:
+        # dataset/images/train/img.jpg -> dataset/labels/train/img.txt
+        # Or: dataset/train/images/img.jpg -> dataset/train/labels/img.txt
+        
+        search_paths = []
+        
+        # 1. Replace 'images' with 'labels' in the path (standard YOLO structure)
+        abs_path_str = str(abs_path)
+        if '/images/' in abs_path_str or '\\images\\' in abs_path_str:
+            label_from_images = abs_path_str.replace('/images/', '/labels/').replace('\\images\\', '\\labels\\')
+            label_from_images = Path(label_from_images).with_suffix('.txt')
+            search_paths.append(label_from_images)
+        
+        # 2. Same directory as image
+        search_paths.append(image_file.with_suffix('.txt'))
+        
+        # 3. labels folder in same parent
+        search_paths.append(image_file.parent / 'labels' / (image_file.stem + '.txt'))
+        
+        # 4. labels folder in dataset root with same relative structure
+        if rel_path:
+            rel_label = Path(rel_path).with_suffix('.txt')
+            search_paths.append(dataset_path / 'labels' / rel_label.name)
+            # Also try with train/val subdirs
+            for split in ['train', 'valid', 'val', 'test']:
+                search_paths.append(dataset_path / 'labels' / split / (image_file.stem + '.txt'))
+        
+        # 5. Direct in dataset labels folder
+        search_paths.append(dataset_path / 'labels' / (image_file.stem + '.txt'))
+        
+        print(f"[batch-annotate] Searching for label file for {image_file.name}")
+        for sp in search_paths:
+            print(f"[batch-annotate]   Checking: {sp} -> exists={sp.exists() if sp else False}")
+            if sp and sp.exists():
+                label_file = sp
+                print(f"[batch-annotate]   FOUND: {label_file}")
+                break
+        
+        if not label_file:
+            print(f"[batch-annotate]   No label file found for {image_file.name}")
+    
+    if label_file and label_file.exists():
+        try:
+            with open(label_file, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 5:
+                        continue
+                    
+                    class_idx = int(parts[0])
+                    color = get_class_color(class_idx)
+                    class_name = classes[class_idx] if class_idx < len(classes) else f"class_{class_idx}"
+                    
+                    # Check if this is segmentation (polygon) or detection (bbox)
+                    # Segmentation: class_id x1 y1 x2 y2 x3 y3 ... (more than 5 parts, odd number of coords)
+                    # Detection: class_id cx cy bw bh (exactly 5 parts)
+                    coords = parts[1:]
+                    
+                    if len(coords) == 4:
+                        # Bounding box format: cx, cy, width, height (normalized)
+                        cx, cy, bw, bh = map(float, coords)
+                        x1 = int((cx - bw/2) * w)
+                        y1 = int((cy - bh/2) * h)
+                        x2 = int((cx + bw/2) * w)
+                        y2 = int((cy + bh/2) * h)
+                        
+                        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                        
+                        # Draw label
+                        (tw, th), _ = cv2.getTextSize(class_name, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                        cv2.rectangle(img, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
+                        cv2.putText(img, class_name, (x1 + 2, y1 - 4), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    else:
+                        # Segmentation polygon format: x1 y1 x2 y2 x3 y3 ... (normalized)
+                        # Convert normalized polygon coords to pixel coords
+                        polygon_points = []
+                        for i in range(0, len(coords) - 1, 2):
+                            px = int(float(coords[i]) * w)
+                            py = int(float(coords[i + 1]) * h)
+                            polygon_points.append([px, py])
+                        
+                        if len(polygon_points) >= 3:
+                            pts = np.array(polygon_points, np.int32).reshape((-1, 1, 2))
+                            
+                            # Draw filled polygon with transparency
+                            overlay = img.copy()
+                            cv2.fillPoly(overlay, [pts], color)
+                            cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
+                            
+                            # Draw polygon outline
+                            cv2.polylines(img, [pts], isClosed=True, color=color, thickness=2)
+                            
+                            # Draw label at centroid
+                            M = cv2.moments(pts)
+                            if M["m00"] != 0:
+                                cx_pt = int(M["m10"] / M["m00"])
+                                cy_pt = int(M["m01"] / M["m00"])
+                            else:
+                                cx_pt, cy_pt = polygon_points[0]
+                            
+                            (tw, th), _ = cv2.getTextSize(class_name, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                            cv2.rectangle(img, (cx_pt - 2, cy_pt - th - 4), (cx_pt + tw + 4, cy_pt + 2), color, -1)
+                            cv2.putText(img, class_name, (cx_pt, cy_pt), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        except Exception as e:
+            print(f"[batch] Error drawing annotations: {e}")
+    
+    # Encode to JPEG and return
+    _, buffer = cv2.imencode('.jpg', img)
+    from fastapi.responses import Response
+    return Response(content=buffer.tobytes(), media_type="image/jpeg")
 
 
 # ============== FORMAT CONVERSION ==============
@@ -1786,6 +2130,10 @@ def _resolve_base_model(model_arch: str, model_type: str) -> str:
     # RF-DETR arches are passed through as-is (no .pt extension)
     if model_type == "rfdetr":
         return arch  # e.g. "rfdetr_base" or "rfdetr_large"
+    # RT-DETR (ultralytics) — strip .pt and reattach
+    if model_type == "rtdetr":
+        base = arch.replace(".pt", "")
+        return f"{base}.pt"  # e.g. "rtdetr-l.pt"
     # Strip any existing suffix variants so we can reattach cleanly
     base = arch.replace("-seg", "").replace("-cls", "").replace(".pt", "")
     if model_type == "segmentation":
@@ -1880,13 +2228,43 @@ async def stop_training(training_id: str):
     return {"success": success}
 
 
+@app.post("/api/train/{training_id}/pause")
+async def pause_training(training_id: str):
+    """Pause training after the current epoch and save a checkpoint."""
+    success = training_manager.pause_training(training_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Training not running or not found")
+    return {"success": True, "message": "Pause requested — will stop after current epoch."}
+
+
+@app.post("/api/train/{training_id}/resume")
+async def resume_training(training_id: str):
+    """Resume a paused training run from the last checkpoint."""
+    result = training_manager.resume_training(training_id)
+    if not result:
+        raise HTTPException(status_code=400, detail="Cannot resume — not paused or no checkpoint found")
+    return {"success": True, "training_id": result}
+
+
+@app.post("/api/train/{training_id}/export-format")
+async def export_model_format(training_id: str, format: str = "onnx"):
+    """Export a trained model to a specific format (onnx, tflite, coreml, engine)."""
+    export_path = training_manager.export_model_format(training_id, format)
+    if not export_path:
+        raise HTTPException(status_code=404, detail="Model not found or export failed")
+    if not os.path.exists(export_path):
+        raise HTTPException(status_code=500, detail="Export produced no output file")
+    ext = os.path.splitext(export_path)[1] or f".{format}"
+    return FileResponse(export_path, filename=f"model{ext}")
+
+
 @app.get("/api/train/{training_id}/export")
 async def export_trained_model(training_id: str):
     """Export a trained model"""
     model_path = training_manager.get_model_path(training_id)
     if not model_path or not os.path.exists(model_path):
         raise HTTPException(status_code=404, detail="Model not found")
-    
+
     return FileResponse(model_path, filename=os.path.basename(model_path))
 
 
@@ -3112,6 +3490,41 @@ async def batch_assign_split(dataset_id: str, request: BatchSplitRequest):
 
 # ============== SNAPSHOTS ==============
 
+@app.get("/api/datasets/{dataset_id}/snapshots")
+async def list_snapshots(dataset_id: str):
+    """List all snapshots for a dataset by scanning the snapshots directory."""
+    snap_dir = SNAPSHOTS_DIR / dataset_id
+    snapshots = []
+    if snap_dir.exists():
+        for snap_zip in sorted(snap_dir.glob("*.zip"), key=lambda p: p.stat().st_mtime, reverse=True):
+            snapshot_id = snap_zip.stem
+            stat = snap_zip.stat()
+            size_mb = stat.st_size / (1024 * 1024)
+            created_at = datetime.fromtimestamp(stat.st_mtime).isoformat()
+            # Try to read stored metadata sidecar if it exists
+            meta_path = snap_dir / f"{snapshot_id}.json"
+            name = snapshot_id
+            description = ""
+            if meta_path.exists():
+                try:
+                    with open(meta_path) as f:
+                        meta = json.load(f)
+                    name = meta.get("name", snapshot_id)
+                    description = meta.get("description", "")
+                    created_at = meta.get("created_at", created_at)
+                except Exception:
+                    pass
+            snapshots.append({
+                "id": snapshot_id,
+                "name": name,
+                "description": description,
+                "dataset_id": dataset_id,
+                "created_at": created_at,
+                "size_mb": round(size_mb, 2),
+            })
+    return {"snapshots": snapshots}
+
+
 @app.post("/api/datasets/{dataset_id}/snapshot")
 async def create_snapshot(dataset_id: str, request: SnapshotRequest):
     """Create a snapshot (zip export) of a dataset at current state."""
@@ -3136,10 +3549,28 @@ async def create_snapshot(dataset_id: str, request: SnapshotRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create snapshot: {e}")
 
+    # Save metadata sidecar so the list endpoint can show name/description
+    created_at = datetime.now().isoformat()
+    meta = {
+        "name": request.name or snapshot_id,
+        "description": request.description or "",
+        "created_at": created_at,
+        "num_images": dataset.get("num_images", 0),
+        "num_annotations": dataset.get("num_annotations", 0),
+    }
+    try:
+        meta_path = snap_dir / f"{snapshot_id}.json"
+        with open(meta_path, "w") as f:
+            json.dump(meta, f)
+    except Exception:
+        pass
+
     return {
         "success": True,
         "snapshot_id": snapshot_id,
         "size_mb": round(size_mb, 2),
+        "created_at": created_at,
+        "name": meta["name"],
     }
 
 
@@ -3193,6 +3624,23 @@ async def restore_snapshot(dataset_id: str, snapshot_id: str):
     except Exception:
         pass
 
+    return {"success": True}
+
+
+@app.delete("/api/datasets/{dataset_id}/snapshot/{snapshot_id}")
+async def delete_snapshot(dataset_id: str, snapshot_id: str):
+    """Delete a snapshot zip and its metadata sidecar."""
+    snap_dir = SNAPSHOTS_DIR / dataset_id
+    snap_zip = snap_dir / f"{snapshot_id}.zip"
+    meta_path = snap_dir / f"{snapshot_id}.json"
+    if not snap_zip.exists():
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    try:
+        snap_zip.unlink()
+        if meta_path.exists():
+            meta_path.unlink()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
     return {"success": True}
 
 

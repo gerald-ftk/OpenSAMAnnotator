@@ -243,12 +243,19 @@ export function SortingView({ selectedDataset, apiUrl, imageCache, updateImageCa
   const saveResults = async () => {
     if (!selectedDataset) return
     try {
-      const response = await fetch(`${apiUrl}/api/datasets/${selectedDataset.id}/filter`, {
+      const deleteIds = Array.from(deleted)
+      if (deleteIds.length === 0) {
+        // Nothing to delete — just reset
+        await loadAllImages()
+        setIsComplete(false)
+        return
+      }
+      const response = await fetch(`${apiUrl}/api/datasets/${selectedDataset.id}/images/batch-delete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keep_ids: Array.from(kept), delete_ids: Array.from(deleted) })
+        body: JSON.stringify({ image_ids: deleteIds })
       })
-      if (!response.ok) throw new Error('Failed to save filter results')
+      if (!response.ok) throw new Error('Failed to delete images')
       await loadAllImages()
       setIsComplete(false)
     } catch (err) {

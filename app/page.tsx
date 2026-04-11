@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useCallback, useEffect } from 'react'
+import { Loader2, AlertTriangle, X } from 'lucide-react'
 import { Sidebar } from '@/components/sidebar'
 import { DatasetsView } from '@/components/datasets-view'
 import { DashboardView } from '@/components/dashboard-view'
@@ -21,9 +22,10 @@ import { CompareView } from '@/components/compare-view'
 import { SnapshotView } from '@/components/snapshot-view'
 import { YamlWizardView } from '@/components/yaml-wizard-view'
 import { DuplicateDetectionView } from '@/components/duplicate-detection-view'
+import { BatchJobsView } from '@/components/batch-jobs-view'
 import { useSettings } from '@/lib/settings-context'
 
-export type ViewType = 'datasets' | 'dashboard' | 'gallery' | 'sorting' | 'annotate' | 'classes' | 'augmentation' | 'video-extraction' | 'split' | 'convert' | 'merge' | 'training' | 'models' | 'health' | 'compare' | 'snapshots' | 'yaml-wizard' | 'settings' | 'duplicate-detection'
+export type ViewType = 'datasets' | 'dashboard' | 'gallery' | 'sorting' | 'annotate' | 'classes' | 'augmentation' | 'video-extraction' | 'split' | 'convert' | 'merge' | 'training' | 'models' | 'batch-jobs' | 'health' | 'compare' | 'snapshots' | 'yaml-wizard' | 'settings' | 'duplicate-detection'
 
 export interface Dataset {
   id: string
@@ -268,6 +270,14 @@ export default function Home() {
             apiUrl={apiUrl}
           />
         )
+      case 'batch-jobs':
+        return (
+          <BatchJobsView
+            datasets={datasets}
+            selectedDataset={selectedDataset}
+            apiUrl={apiUrl}
+          />
+        )
       case 'yaml-wizard':
         return (
           <YamlWizardView
@@ -286,21 +296,24 @@ export default function Home() {
     <div className="flex h-screen bg-background flex-col overflow-hidden">
       {/* GPU status banner */}
       {gpuStatus && (
-        <div className={`flex items-center gap-3 px-4 py-2 text-xs font-medium z-50 shrink-0 ${
+        <div className={`flex items-center gap-2.5 px-4 py-2 text-xs font-medium z-50 shrink-0 ${
           gpuStatus.state === 'failed'
             ? 'bg-destructive/90 text-destructive-foreground'
             : 'bg-warning/90 text-warning-foreground'
         }`}>
-          <span className="shrink-0 text-sm">
-            {gpuStatus.state === 'installing' ? '⏳' : '⚠️'}
-          </span>
+          {gpuStatus.state === 'installing' ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+          ) : (
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          )}
           <span className="flex-1 truncate">{gpuStatus.message}</span>
           {gpuStatus.state === 'failed' && (
             <button
-              className="shrink-0 underline text-xs opacity-80 hover:opacity-100"
+              className="shrink-0 opacity-70 hover:opacity-100 transition-opacity"
               onClick={() => setGpuStatus(null)}
+              aria-label="Dismiss"
             >
-              Dismiss
+              <X className="w-3.5 h-3.5" />
             </button>
           )}
         </div>

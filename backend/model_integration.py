@@ -34,15 +34,43 @@ class ModelManager:
 
     # Full pretrained catalog — single source of truth used by list_models()
     _PRETRAINED_CATALOG = [
+        # YOLOv8
         {"id": "yolov8n",  "name": "YOLOv8 Nano",   "type": "yolo", "pretrained": True},
         {"id": "yolov8s",  "name": "YOLOv8 Small",  "type": "yolo", "pretrained": True},
         {"id": "yolov8m",  "name": "YOLOv8 Medium", "type": "yolo", "pretrained": True},
         {"id": "yolov8l",  "name": "YOLOv8 Large",  "type": "yolo", "pretrained": True},
         {"id": "yolov8x",  "name": "YOLOv8 XLarge", "type": "yolo", "pretrained": True},
+        # YOLOv5
         {"id": "yolov5n",  "name": "YOLOv5 Nano",   "type": "yolo", "pretrained": True},
         {"id": "yolov5s",  "name": "YOLOv5 Small",  "type": "yolo", "pretrained": True},
-        {"id": "yolov11n", "name": "YOLOv11 Nano",  "type": "yolo", "pretrained": True},
-        {"id": "yolov11s", "name": "YOLOv11 Small", "type": "yolo", "pretrained": True},
+        # YOLOv9
+        {"id": "yolov9n",  "name": "YOLOv9 Nano",     "type": "yolo", "pretrained": True},
+        {"id": "yolov9s",  "name": "YOLOv9 Small",    "type": "yolo", "pretrained": True},
+        {"id": "yolov9m",  "name": "YOLOv9 Medium",   "type": "yolo", "pretrained": True},
+        {"id": "yolov9c",  "name": "YOLOv9 Compact",  "type": "yolo", "pretrained": True},
+        {"id": "yolov9e",  "name": "YOLOv9 Extended", "type": "yolo", "pretrained": True},
+        # YOLOv10
+        {"id": "yolov10n", "name": "YOLOv10 Nano",     "type": "yolo", "pretrained": True},
+        {"id": "yolov10s", "name": "YOLOv10 Small",    "type": "yolo", "pretrained": True},
+        {"id": "yolov10m", "name": "YOLOv10 Medium",   "type": "yolo", "pretrained": True},
+        {"id": "yolov10b", "name": "YOLOv10 Balanced", "type": "yolo", "pretrained": True},
+        {"id": "yolov10l", "name": "YOLOv10 Large",    "type": "yolo", "pretrained": True},
+        {"id": "yolov10x", "name": "YOLOv10 XLarge",   "type": "yolo", "pretrained": True},
+        # YOLO11
+        {"id": "yolo11n",  "name": "YOLO11 Nano",   "type": "yolo", "pretrained": True},
+        {"id": "yolo11s",  "name": "YOLO11 Small",  "type": "yolo", "pretrained": True},
+        {"id": "yolo11m",  "name": "YOLO11 Medium", "type": "yolo", "pretrained": True},
+        {"id": "yolo11l",  "name": "YOLO11 Large",  "type": "yolo", "pretrained": True},
+        {"id": "yolo11x",  "name": "YOLO11 XLarge", "type": "yolo", "pretrained": True},
+        # YOLO12
+        {"id": "yolo12n",  "name": "YOLO12 Nano",   "type": "yolo", "pretrained": True},
+        {"id": "yolo12s",  "name": "YOLO12 Small",  "type": "yolo", "pretrained": True},
+        {"id": "yolo12m",  "name": "YOLO12 Medium", "type": "yolo", "pretrained": True},
+        {"id": "yolo12l",  "name": "YOLO12 Large",  "type": "yolo", "pretrained": True},
+        {"id": "yolo12x",  "name": "YOLO12 XLarge", "type": "yolo", "pretrained": True},
+        # RT-DETR (ultralytics)
+        {"id": "rtdetr-l", "name": "RT-DETR Large",  "type": "rtdetr", "pretrained": True},
+        {"id": "rtdetr-x", "name": "RT-DETR XLarge", "type": "rtdetr", "pretrained": True},
         {"id": "sam_vit_b",   "name": "SAM Base",      "type": "sam",   "pretrained": True},
         {"id": "sam_vit_l",   "name": "SAM Large",     "type": "sam",   "pretrained": True},
         {"id": "sam2_tiny",   "name": "SAM 2 Tiny",    "type": "sam2",  "pretrained": True},
@@ -200,7 +228,7 @@ class ModelManager:
             "classes": []
         }
         try:
-            if model_type == "yolo":
+            if model_type in ("yolo", "rtdetr"):
                 model_info = self._load_pretrained_yolo(model_name, model_info)
             elif model_type in ["sam", "sam2", "sam3"]:
                 model_info = self._load_pretrained_sam(model_name, model_info, hf_token=hf_token)
@@ -248,22 +276,52 @@ class ModelManager:
         "sam3":        ("sam3.pt",       "https://huggingface.co/facebook/sam3/resolve/main/sam3.pt?download=true"),
     }
 
-    # Direct download URLs for pretrained YOLO models
+    # Direct download URLs for pretrained YOLO/RT-DETR models
+    _BASE = "https://github.com/ultralytics/assets/releases/download/v8.3.0"
     _YOLO_URLS = {
-        "yolov8n":  ("yolov8n.pt",  "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt"),
-        "yolov8s":  ("yolov8s.pt",  "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s.pt"),
-        "yolov8m":  ("yolov8m.pt",  "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8m.pt"),
-        "yolov8l":  ("yolov8l.pt",  "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8l.pt"),
-        "yolov8x":  ("yolov8x.pt",  "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8x.pt"),
-        "yolov5n":  ("yolov5nu.pt", "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov5nu.pt"),
-        "yolov5s":  ("yolov5su.pt", "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov5su.pt"),
-        "yolov11n": ("yolo11n.pt",  "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt"),
-        "yolov11s": ("yolo11s.pt",  "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11s.pt"),
+        # YOLOv8
+        "yolov8n":  ("yolov8n.pt",  f"{_BASE}/yolov8n.pt"),
+        "yolov8s":  ("yolov8s.pt",  f"{_BASE}/yolov8s.pt"),
+        "yolov8m":  ("yolov8m.pt",  f"{_BASE}/yolov8m.pt"),
+        "yolov8l":  ("yolov8l.pt",  f"{_BASE}/yolov8l.pt"),
+        "yolov8x":  ("yolov8x.pt",  f"{_BASE}/yolov8x.pt"),
+        # YOLOv5 (ultralytics repack)
+        "yolov5n":  ("yolov5nu.pt", f"{_BASE}/yolov5nu.pt"),
+        "yolov5s":  ("yolov5su.pt", f"{_BASE}/yolov5su.pt"),
+        # YOLOv9
+        "yolov9n":  ("yolov9n.pt",  f"{_BASE}/yolov9n.pt"),
+        "yolov9s":  ("yolov9s.pt",  f"{_BASE}/yolov9s.pt"),
+        "yolov9m":  ("yolov9m.pt",  f"{_BASE}/yolov9m.pt"),
+        "yolov9c":  ("yolov9c.pt",  f"{_BASE}/yolov9c.pt"),
+        "yolov9e":  ("yolov9e.pt",  f"{_BASE}/yolov9e.pt"),
+        # YOLOv10
+        "yolov10n": ("yolov10n.pt", f"{_BASE}/yolov10n.pt"),
+        "yolov10s": ("yolov10s.pt", f"{_BASE}/yolov10s.pt"),
+        "yolov10m": ("yolov10m.pt", f"{_BASE}/yolov10m.pt"),
+        "yolov10b": ("yolov10b.pt", f"{_BASE}/yolov10b.pt"),
+        "yolov10l": ("yolov10l.pt", f"{_BASE}/yolov10l.pt"),
+        "yolov10x": ("yolov10x.pt", f"{_BASE}/yolov10x.pt"),
+        # YOLO11
+        "yolo11n":  ("yolo11n.pt",  f"{_BASE}/yolo11n.pt"),
+        "yolo11s":  ("yolo11s.pt",  f"{_BASE}/yolo11s.pt"),
+        "yolo11m":  ("yolo11m.pt",  f"{_BASE}/yolo11m.pt"),
+        "yolo11l":  ("yolo11l.pt",  f"{_BASE}/yolo11l.pt"),
+        "yolo11x":  ("yolo11x.pt",  f"{_BASE}/yolo11x.pt"),
+        # YOLO12
+        "yolo12n":  ("yolo12n.pt",  f"{_BASE}/yolo12n.pt"),
+        "yolo12s":  ("yolo12s.pt",  f"{_BASE}/yolo12s.pt"),
+        "yolo12m":  ("yolo12m.pt",  f"{_BASE}/yolo12m.pt"),
+        "yolo12l":  ("yolo12l.pt",  f"{_BASE}/yolo12l.pt"),
+        "yolo12x":  ("yolo12x.pt",  f"{_BASE}/yolo12x.pt"),
+        # RT-DETR (ultralytics)
+        "rtdetr-l": ("rtdetr-l.pt", f"{_BASE}/rtdetr-l.pt"),
+        "rtdetr-x": ("rtdetr-x.pt", f"{_BASE}/rtdetr-x.pt"),
         # YOLO-World v2 — zero-shot open-vocabulary detection
-        "yoloworld_s": ("yolov8s-worldv2.pt", "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s-worldv2.pt"),
-        "yoloworld_m": ("yolov8m-worldv2.pt", "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8m-worldv2.pt"),
-        "yoloworld_l": ("yolov8l-worldv2.pt", "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8l-worldv2.pt"),
+        "yoloworld_s": ("yolov8s-worldv2.pt", f"{_BASE}/yolov8s-worldv2.pt"),
+        "yoloworld_m": ("yolov8m-worldv2.pt", f"{_BASE}/yolov8m-worldv2.pt"),
+        "yoloworld_l": ("yolov8l-worldv2.pt", f"{_BASE}/yolov8l-worldv2.pt"),
     }
+    del _BASE  # class-level cleanup
 
     # RF-DETR expected filenames in workspace/models/
     _RFDETR_FILENAMES = {
@@ -616,15 +674,19 @@ class ModelManager:
         return model_info
 
     def _load_rfdetr_from_checkpoint(self, model_path: Path, model_info: Dict) -> Dict:
-        """Load a locally trained RF-DETR checkpoint (.pth) for inference."""
+        """Load a locally trained or pretrained RF-DETR checkpoint (.pth) for inference."""
         import sys, subprocess
         try:
             import rfdetr as _r  # noqa: F401
         except ImportError:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "rfdetr", "-q"], timeout=300)
         try:
-            from rfdetr import RFDETRBase
-            model = RFDETRBase(pretrain_weights=str(model_path))
+            from rfdetr import RFDETRBase, RFDETRLarge
+            # Choose the right class based on the filename
+            name_lower = str(model_path).lower()
+            is_large = "large" in name_lower
+            cls = RFDETRLarge if is_large else RFDETRBase
+            model = cls(pretrain_weights=str(model_path))
             model_info["model"]      = model
             model_info["loaded"]     = True
             model_info["downloaded"] = True
@@ -792,6 +854,20 @@ class ModelManager:
         # Build combined stem→url map for all known pretrained models
         all_urls: dict = {**self._YOLO_URLS, **self._SAM_URLS}
 
+        # 0. RF-DETR pretrained catalog — uses _RFDETR_FILENAMES, not _YOLO_URLS
+        rfdetr_filename = self._RFDETR_FILENAMES.get(model_id)
+        if rfdetr_filename:
+            local_path = self.models_dir / rfdetr_filename
+            if local_path.exists():
+                info: Dict[str, Any] = {
+                    "id": model_id, "name": rfdetr_filename,
+                    "type": "rfdetr", "pretrained": True,
+                    "path": str(local_path), "model": None, "classes": [],
+                }
+                self._load_rfdetr_from_checkpoint(local_path, info)
+                self.loaded_models[model_id] = info
+                return
+
         # 1. Try catalog entry (pretrained model with known URL)
         entry = all_urls.get(model_id)
         if entry:
@@ -848,6 +924,8 @@ class ModelManager:
                 self._try_load_sam_ultralytics(str(f), info)
                 if not info.get("model"):
                     self._load_sam_model(f, info)
+            elif mtype == "rfdetr":
+                self._load_rfdetr_from_checkpoint(f, info)
             elif mtype == "yoloworld":
                 try:
                     from ultralytics import YOLOWorld
@@ -1214,8 +1292,27 @@ class ModelManager:
 
         elif model_type == "yoloworld":
             try:
+                import torch
                 texts = [t.strip() for t in text_prompt.split(",") if t.strip()] if text_prompt else ["object"]
                 model.set_classes(texts)
+                # set_classes computes text embeddings via CLIP on CPU; move them to the
+                # inference device so they match the model weights during prediction.
+                if device != "cpu":
+                    target_device = f"cuda:{device}" if isinstance(device, int) else str(device)
+                    try:
+                        # txt_feats may live directly on the model or on the predictor's copy
+                        for container in [
+                            getattr(model, "model", None),
+                            getattr(getattr(model, "predictor", None), "model", None),
+                        ]:
+                            if container is None:
+                                continue
+                            if hasattr(container, "txt_feats") and container.txt_feats is not None:
+                                container.txt_feats = container.txt_feats.to(target_device)
+                            if hasattr(container, "txt_pe") and container.txt_pe is not None:
+                                container.txt_pe = container.txt_pe.to(target_device)
+                    except Exception:
+                        pass
                 results = model(str(image_path), conf=confidence_threshold, verbose=False, device=device)
                 for result in results:
                     boxes = result.boxes
@@ -1248,16 +1345,24 @@ class ModelManager:
                     text_input = ". ".join(texts) + "."
                     image = Image.open(image_path).convert("RGB")
                     inputs = processor(images=image, text=text_input, return_tensors="pt")
-                    # Move inputs to same device as model
+                    # Determine inference device and move ALL model tensors there
+                    # (lazy-initialized buffers may still be on CPU after the initial .to())
                     model_device = next(model.parameters()).device
+                    model.to(model_device)
                     inputs = {k: v.to(model_device) if hasattr(v, "to") else v for k, v in inputs.items()}
                     with torch.no_grad():
                         outputs = model(**inputs)
-                    target_sizes = torch.tensor([image.size[::-1]])
+                    # Post-processing mixes logit-derived CUDA indices with CPU tokenizer
+                    # lookups — do it entirely on CPU to avoid device mismatches.
+                    cpu_outputs = outputs.__class__(
+                        **{k: (v.cpu() if isinstance(v, torch.Tensor) else v)
+                           for k, v in outputs.items()}
+                    )
+                    target_sizes = torch.tensor([[image.size[1], image.size[0]]])
                     results = processor.post_process_grounded_object_detection(
-                        outputs,
-                        inputs["input_ids"],
-                        box_threshold=confidence_threshold,
+                        cpu_outputs,
+                        inputs["input_ids"].cpu(),
+                        threshold=confidence_threshold,
                         text_threshold=max(0.1, confidence_threshold * 0.5),
                         target_sizes=target_sizes,
                     )

@@ -317,16 +317,17 @@ export function DatasetsView({
   return (
     <div className="h-full flex flex-col p-6 overflow-y-auto">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-start justify-between mb-6">
         <div>
-          <h2 className="text-2xl font-semibold text-foreground">Datasets</h2>
-          <p className="text-muted-foreground text-sm mt-1">
-            Load, manage, and organize your computer vision datasets
+          <p className="text-[10px] font-mono uppercase tracking-[0.2em] text-muted-foreground/50 mb-2">Datasets</p>
+          <h2 className="text-2xl font-display font-bold tracking-tight">Your Datasets</h2>
+          <p className="text-sm text-muted-foreground mt-1 max-w-lg">
+            A dataset is a collection of images paired with labels. Load one here to begin annotating, processing, or training.
           </p>
         </div>
-        <Button onClick={handleOpenFolderBrowser} variant="outline">
-          <FolderOpen className="w-4 h-4 mr-2" />
-          Open Local Folder
+        <Button onClick={handleOpenFolderBrowser} variant="outline" className="shrink-0">
+          <FolderOpen className="w-4 h-4 mr-2" strokeWidth={1.75} />
+          Browse Local Folder
         </Button>
       </div>
 
@@ -380,15 +381,16 @@ export function DatasetsView({
           )}
         </div>
         
-        <h3 className="text-lg font-medium mb-2">
-          {isUploading 
-            ? uploadStatus === 'processing' 
-              ? 'Processing Dataset...' 
-              : 'Uploading...' 
-            : 'Drop your dataset here'}
+        <h3 className="text-base font-semibold mb-1.5">
+          {isUploading
+            ? uploadStatus === 'processing'
+              ? 'Processing dataset…'
+              : 'Uploading…'
+            : 'Drop your dataset ZIP here'}
         </h3>
-        <p className="text-sm text-muted-foreground mb-4 max-w-md">
-          Supports ZIP files with YOLO, COCO, Pascal VOC, LabelMe, and classification folder formats
+        <p className="text-xs text-muted-foreground mb-4 max-w-sm leading-relaxed">
+          Supports YOLO, COCO, Pascal VOC, LabelMe, and classification folder formats.
+          <br />Or use <span className="font-medium text-foreground/70">Browse Local Folder</span> to load without uploading.
         </p>
         
         {isUploading ? (
@@ -430,89 +432,91 @@ export function DatasetsView({
       <div className="flex-1 overflow-y-auto">
         {datasets.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-center">
-            <Database className="w-12 h-12 text-muted-foreground/30 mb-4" />
-            <h3 className="text-lg font-medium text-muted-foreground">No datasets loaded</h3>
-            <p className="text-sm text-muted-foreground/70 mt-1 mb-4">
-              Upload a ZIP file or open a local folder to get started
+            <div className="w-12 h-12 rounded-xl bg-muted/60 border border-border flex items-center justify-center mb-4">
+              <Database className="w-5 h-5 text-muted-foreground/50" strokeWidth={1.5} />
+            </div>
+            <h3 className="text-base font-semibold">No datasets loaded</h3>
+            <p className="text-xs text-muted-foreground mt-1.5 mb-5 max-w-xs leading-relaxed">
+              Use the drop zone above to upload a dataset ZIP, or browse a folder on your computer.
             </p>
-            <Button variant="outline" onClick={handleOpenFolderBrowser}>
-              <FolderOpen className="w-4 h-4 mr-2" />
+            <Button variant="outline" size="sm" onClick={handleOpenFolderBrowser}>
+              <FolderOpen className="w-3.5 h-3.5 mr-1.5" strokeWidth={1.75} />
               Browse Local Folders
             </Button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
             {datasets.map((dataset) => (
-              <Card 
+              <Card
                 key={dataset.id}
                 className={cn(
-                  'cursor-pointer transition-all hover:shadow-md group',
-                  selectedDataset?.id === dataset.id && 'ring-2 ring-primary shadow-md'
+                  'cursor-pointer transition-all group hover:border-primary/30 hover:bg-primary/[0.02]',
+                  selectedDataset?.id === dataset.id
+                    ? 'border-primary/40 bg-primary/[0.03] shadow-sm'
+                    : ''
                 )}
                 onClick={() => onSelectDataset(dataset)}
               >
-                <CardHeader className="pb-3">
-                  <div className="flex items-start justify-between">
+                <CardHeader className="pb-2">
+                  <div className="flex items-start justify-between gap-2">
                     <div className="flex-1 min-w-0">
-                      <CardTitle className="text-base truncate">{dataset.name}</CardTitle>
-                      <CardDescription className="mt-1.5 flex items-center gap-2">
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-secondary rounded text-xs font-medium">
+                      <CardTitle className="text-sm font-semibold truncate">{dataset.name}</CardTitle>
+                      <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                        <span className="inline-flex items-center px-2 py-0.5 bg-secondary rounded-md text-[10px] font-mono font-medium">
                           {dataset.format.toUpperCase()}
                         </span>
-                        <span className={cn('px-2 py-0.5 rounded text-xs font-medium', getTaskTypeColor(dataset.task_type))}>
+                        <span className={cn('px-2 py-0.5 rounded-md text-[10px] font-medium', getTaskTypeColor(dataset.task_type))}>
                           {dataset.task_type}
                         </span>
-                      </CardDescription>
+                      </div>
                     </div>
                     {selectedDataset?.id === dataset.id && (
-                      <CheckCircle className="w-5 h-5 text-primary flex-shrink-0" />
+                      <CheckCircle className="w-4 h-4 text-primary shrink-0 mt-0.5" strokeWidth={2} />
                     )}
                   </div>
                 </CardHeader>
                 <CardContent className="pt-0">
-                  <div className="grid grid-cols-2 gap-3 text-sm">
-                    <div className="flex items-center gap-2 text-muted-foreground">
-                      <Image className="w-4 h-4" />
+                  <div className="flex items-center gap-4 text-xs text-muted-foreground mb-3">
+                    <div className="flex items-center gap-1.5">
+                      <Image className="w-3.5 h-3.5" strokeWidth={1.75} />
                       <span>{dataset.num_images.toLocaleString()} images</span>
                     </div>
-                    <div className="flex items-center gap-2 text-muted-foreground">
-                      <Tag className="w-4 h-4" />
+                    <div className="flex items-center gap-1.5">
+                      <Tag className="w-3.5 h-3.5" strokeWidth={1.75} />
                       <span>{dataset.classes?.length || 0} classes</span>
                     </div>
                   </div>
 
                   {dataset.classes && dataset.classes.length > 0 && (
-                    <div className="mt-3 pt-3 border-t border-border">
-                      <div className="flex flex-wrap gap-1">
-                        {dataset.classes.slice(0, 4).map((cls, idx) => (
-                          <span key={idx} className="px-2 py-0.5 bg-muted rounded text-xs">{cls}</span>
-                        ))}
-                        {dataset.classes.length > 4 && (
-                          <span className="px-2 py-0.5 text-muted-foreground text-xs">
-                            +{dataset.classes.length - 4} more
-                          </span>
-                        )}
-                      </div>
+                    <div className="flex flex-wrap gap-1 mb-3">
+                      {dataset.classes.slice(0, 4).map((cls, idx) => (
+                        <span key={idx} className="px-1.5 py-0.5 bg-muted rounded text-[10px] font-medium">{cls}</span>
+                      ))}
+                      {dataset.classes.length > 4 && (
+                        <span className="px-1.5 py-0.5 text-muted-foreground/60 text-[10px]">
+                          +{dataset.classes.length - 4} more
+                        </span>
+                      )}
                     </div>
                   )}
 
-                  <div className="flex items-center gap-2 mt-4 pt-3 border-t border-border opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Button 
-                      size="sm" 
-                      variant="outline" 
-                      className="flex-1"
+                  <div className="flex items-center gap-2 pt-3 border-t border-border opacity-0 group-hover:opacity-100 transition-opacity">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="flex-1 h-7 text-xs"
                       onClick={(e) => { e.stopPropagation(); handleExport(dataset) }}
                     >
-                      <Download className="w-3 h-3 mr-1" />
+                      <Download className="w-3 h-3 mr-1" strokeWidth={1.75} />
                       Export
                     </Button>
-                    <Button 
-                      size="sm" 
+                    <Button
+                      size="sm"
                       variant="outline"
-                      className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                      className="h-7 text-destructive hover:text-destructive hover:bg-destructive/10"
                       onClick={(e) => { e.stopPropagation(); handleDelete(dataset.id) }}
                     >
-                      <Trash2 className="w-3 h-3" />
+                      <Trash2 className="w-3 h-3" strokeWidth={1.75} />
                     </Button>
                   </div>
                 </CardContent>
@@ -528,7 +532,8 @@ export function DatasetsView({
           <DialogHeader>
             <DialogTitle>Browse Local Folders</DialogTitle>
             <DialogDescription>
-              Navigate to your dataset folder and click &quot;Load&quot; to import it directly without uploading
+              Navigate to your dataset folder on this computer and click <strong>Load</strong> to import it — no upload needed.
+              Highlighted folders have been detected as datasets.
             </DialogDescription>
           </DialogHeader>
           

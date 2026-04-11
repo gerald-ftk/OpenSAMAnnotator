@@ -74,7 +74,7 @@ interface LogEntry {
 /** Shape returned by GET /api/train/:id/status */
 interface TrainingStatus {
   id: string
-  status: "starting" | "running" | "completed" | "failed" | "stopped"
+  status: "starting" | "running" | "completed" | "failed" | "stopped" | "paused"
   progress: number
   current_epoch: number
   total_epochs: number
@@ -93,21 +93,59 @@ interface TrainingStatus {
 // ---------------------------------------------------------------------------
 
 const MODEL_ARCHITECTURES: Array<{ value: string; label: string; params: string; taskType: string }> = [
-  { value: "yolov8n",      label: "YOLOv8 Nano",    params: "3.2M",  taskType: "yolo" },
-  { value: "yolov8s",      label: "YOLOv8 Small",   params: "11.2M", taskType: "yolo" },
-  { value: "yolov8m",      label: "YOLOv8 Medium",  params: "25.9M", taskType: "yolo" },
-  { value: "yolov8l",      label: "YOLOv8 Large",   params: "43.7M", taskType: "yolo" },
-  { value: "yolov8x",      label: "YOLOv8 XLarge",  params: "68.2M", taskType: "yolo" },
-  { value: "yolov8n-seg",  label: "YOLOv8n-Seg",    params: "3.4M",  taskType: "segmentation" },
-  { value: "yolov8n-cls",  label: "YOLOv8n-Cls",    params: "2.7M",  taskType: "classification" },
-  { value: "rfdetr_base",  label: "RF-DETR Base",   params: "29M",   taskType: "rfdetr" },
-  { value: "rfdetr_large", label: "RF-DETR Large",  params: "128M",  taskType: "rfdetr" },
+  // ── YOLOv8 ──────────────────────────────────────────────────────────────────
+  { value: "yolov8n",      label: "YOLOv8 Nano",       params: "3.2M",  taskType: "yolo" },
+  { value: "yolov8s",      label: "YOLOv8 Small",      params: "11.2M", taskType: "yolo" },
+  { value: "yolov8m",      label: "YOLOv8 Medium",     params: "25.9M", taskType: "yolo" },
+  { value: "yolov8l",      label: "YOLOv8 Large",      params: "43.7M", taskType: "yolo" },
+  { value: "yolov8x",      label: "YOLOv8 XLarge",     params: "68.2M", taskType: "yolo" },
+  { value: "yolov8n-seg",  label: "YOLOv8n Seg",       params: "3.4M",  taskType: "segmentation" },
+  { value: "yolov8s-seg",  label: "YOLOv8s Seg",       params: "11.8M", taskType: "segmentation" },
+  { value: "yolov8m-seg",  label: "YOLOv8m Seg",       params: "27.3M", taskType: "segmentation" },
+  { value: "yolov8n-cls",  label: "YOLOv8n Cls",       params: "2.7M",  taskType: "classification" },
+  { value: "yolov8s-cls",  label: "YOLOv8s Cls",       params: "6.4M",  taskType: "classification" },
+  // ── YOLOv9 ──────────────────────────────────────────────────────────────────
+  { value: "yolov9n",      label: "YOLOv9 Nano",       params: "2.0M",  taskType: "yolo" },
+  { value: "yolov9s",      label: "YOLOv9 Small",      params: "7.2M",  taskType: "yolo" },
+  { value: "yolov9m",      label: "YOLOv9 Medium",     params: "20.1M", taskType: "yolo" },
+  { value: "yolov9c",      label: "YOLOv9 Compact",    params: "25.5M", taskType: "yolo" },
+  { value: "yolov9e",      label: "YOLOv9 Extended",   params: "57.8M", taskType: "yolo" },
+  // ── YOLOv10 ─────────────────────────────────────────────────────────────────
+  { value: "yolov10n",     label: "YOLOv10 Nano",      params: "2.3M",  taskType: "yolo" },
+  { value: "yolov10s",     label: "YOLOv10 Small",     params: "7.2M",  taskType: "yolo" },
+  { value: "yolov10m",     label: "YOLOv10 Medium",    params: "15.4M", taskType: "yolo" },
+  { value: "yolov10b",     label: "YOLOv10 Balanced",  params: "19.1M", taskType: "yolo" },
+  { value: "yolov10l",     label: "YOLOv10 Large",     params: "24.4M", taskType: "yolo" },
+  { value: "yolov10x",     label: "YOLOv10 XLarge",    params: "29.5M", taskType: "yolo" },
+  // ── YOLO11 ──────────────────────────────────────────────────────────────────
+  { value: "yolo11n",      label: "YOLO11 Nano",       params: "2.6M",  taskType: "yolo" },
+  { value: "yolo11s",      label: "YOLO11 Small",      params: "9.4M",  taskType: "yolo" },
+  { value: "yolo11m",      label: "YOLO11 Medium",     params: "20.1M", taskType: "yolo" },
+  { value: "yolo11l",      label: "YOLO11 Large",      params: "25.3M", taskType: "yolo" },
+  { value: "yolo11x",      label: "YOLO11 XLarge",     params: "56.9M", taskType: "yolo" },
+  { value: "yolo11n-seg",  label: "YOLO11n Seg",       params: "2.9M",  taskType: "segmentation" },
+  { value: "yolo11s-seg",  label: "YOLO11s Seg",       params: "10.1M", taskType: "segmentation" },
+  { value: "yolo11n-cls",  label: "YOLO11n Cls",       params: "1.6M",  taskType: "classification" },
+  { value: "yolo11s-cls",  label: "YOLO11s Cls",       params: "5.6M",  taskType: "classification" },
+  // ── YOLO12 ──────────────────────────────────────────────────────────────────
+  { value: "yolo12n",      label: "YOLO12 Nano",       params: "2.6M",  taskType: "yolo" },
+  { value: "yolo12s",      label: "YOLO12 Small",      params: "9.3M",  taskType: "yolo" },
+  { value: "yolo12m",      label: "YOLO12 Medium",     params: "20.2M", taskType: "yolo" },
+  { value: "yolo12l",      label: "YOLO12 Large",      params: "26.4M", taskType: "yolo" },
+  { value: "yolo12x",      label: "YOLO12 XLarge",     params: "59.1M", taskType: "yolo" },
+  // ── RT-DETR (Ultralytics) ────────────────────────────────────────────────────
+  { value: "rtdetr-l",     label: "RT-DETR Large",     params: "32M",   taskType: "rtdetr" },
+  { value: "rtdetr-x",     label: "RT-DETR XLarge",    params: "67M",   taskType: "rtdetr" },
+  // ── RF-DETR (Roboflow) ───────────────────────────────────────────────────────
+  { value: "rfdetr_base",  label: "RF-DETR Base",      params: "29M",   taskType: "rfdetr" },
+  { value: "rfdetr_large", label: "RF-DETR Large",     params: "128M",  taskType: "rfdetr" },
 ]
 
 const TASK_TYPES = [
-  { value: "yolo",           label: "Object Detection" },
+  { value: "yolo",           label: "Object Detection (YOLO)" },
   { value: "segmentation",   label: "Instance Segmentation" },
   { value: "classification", label: "Classification" },
+  { value: "rtdetr",         label: "RT-DETR Detection" },
   { value: "rfdetr",         label: "RF-DETR Detection" },
 ]
 
@@ -165,7 +203,7 @@ export function TrainingView({ datasets = [], apiUrl = "http://localhost:8000" }
   // Runtime state
   const [trainingId, setTrainingId]   = useState<string | null>(null)
   const [isTraining, setIsTraining]   = useState(false)
-  const [isPaused, setIsPaused]       = useState(false)   // freezes the polling loop only
+  const [isPaused, setIsPaused]       = useState(false)   // true when training is paused on backend
   const [currentEpoch, setCurrentEpoch] = useState(0)
   const [totalEpochs, setTotalEpochs] = useState(100)
   const [progress, setProgress]       = useState(0)
@@ -338,6 +376,13 @@ export function TrainingView({ datasets = [], apiUrl = "http://localhost:8000" }
           setStatusLabel("Stopped")
           setGpuUsage(0); setMemoryUsage(0)
           stopPolling()
+        } else if (data.status === "paused") {
+          setIsPaused(true)
+          if (data.model_path) setModelPath(data.model_path)
+          addLog("Training paused — checkpoint saved. Click Resume to continue.", "info")
+          setStatusLabel("Paused")
+          setGpuUsage(0); setMemoryUsage(0)
+          stopPolling()
         }
       } catch (err) {
         addLog(`Polling error: ${err instanceof Error ? err.message : err}`, "error")
@@ -431,7 +476,7 @@ export function TrainingView({ datasets = [], apiUrl = "http://localhost:8000" }
     if (!trainingId) return
     try {
       await fetch(`${apiUrl}/api/train/${trainingId}/stop`, { method: "POST" })
-      addLog("Stop signal sent to backend.", "warning")
+      addLog("Stop signal sent — training will halt after the current epoch.", "warning")
       setIsTraining(false)
       setIsPaused(false)
       setStatusLabel("Stopping…")
@@ -441,17 +486,40 @@ export function TrainingView({ datasets = [], apiUrl = "http://localhost:8000" }
     }
   }
 
-  function handlePauseResume() {
-    setIsPaused(prev => {
-      const next = !prev
-      addLog(
-        next
-          ? "Polling paused — training continues on backend. Click Resume to see updates."
-          : "Polling resumed.",
-        "info"
-      )
-      return next
-    })
+  async function handlePauseResume() {
+    if (!trainingId) return
+    if (!isPaused) {
+      // Pause: call backend to stop after current epoch and save checkpoint
+      try {
+        const res = await fetch(`${apiUrl}/api/train/${trainingId}/pause`, { method: "POST" })
+        if (res.ok) {
+          addLog("Pause requested — training will stop after this epoch and save a checkpoint.", "info")
+          setIsPaused(true)
+          setStatusLabel("Pausing…")
+          stopPolling()
+        } else {
+          addLog("Pause failed.", "error")
+        }
+      } catch (err: unknown) {
+        addLog(`Pause request failed: ${err instanceof Error ? err.message : err}`, "error")
+      }
+    } else {
+      // Resume: call backend to restart training from last checkpoint
+      try {
+        const res = await fetch(`${apiUrl}/api/train/${trainingId}/resume`, { method: "POST" })
+        if (res.ok) {
+          addLog("Training resumed from checkpoint.", "info")
+          setStatusLabel("Running")
+          // Setting isPaused to false triggers the polling useEffect to restart
+          setIsPaused(false)
+        } else {
+          const err = await res.json().catch(() => ({ detail: "Resume failed" }))
+          addLog(`Resume failed: ${err.detail}`, "error")
+        }
+      } catch (err: unknown) {
+        addLog(`Resume request failed: ${err instanceof Error ? err.message : err}`, "error")
+      }
+    }
   }
 
   function handleExportModel() {
@@ -824,7 +892,7 @@ export function TrainingView({ datasets = [], apiUrl = "http://localhost:8000" }
                       <span className="font-mono text-xs">⚡ {latestMetrics.speed_ms.toFixed(0)} ms/iter</span>
                     )}
                     {etaDisplay && `ETA: ${etaDisplay}`}
-                    {isPaused && "Polling paused"}
+                    {isPaused && "Training paused — checkpoint saved"}
                   </span>
                 </div>
                 <Progress value={progress} className="h-2" />

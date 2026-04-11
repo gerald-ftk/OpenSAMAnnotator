@@ -758,8 +758,9 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
         { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image_id: currentImage.id, annotations: annsToSave }) }
       )
       if (!resp.ok) throw new Error('Failed to save')
-      // Update global image cache entry
+      // Update global image cache entry — set silent flag so useEffect doesn't reset to image 0
       const updated = allImages.map(img => img.id === currentImage.id ? { ...img, annotations: annsToSave } : img)
+      silentRefreshRef.current = true
       setAllImages(updated)
       updateImageCache(selectedDataset.id, updated)
 
