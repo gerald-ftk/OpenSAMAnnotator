@@ -1,4 +1,4 @@
-# CV Dataset Manager - Complete Documentation
+# VisOS — Complete Documentation
 
 ## Table of Contents
 
@@ -15,8 +15,9 @@
 11. [Dataset Merging](#dataset-merging)
 12. [Model Management](#model-management)
 13. [Training](#training)
-14. [Settings](#settings)
-15. [API Reference](#api-reference)
+14. [Batch Jobs](#batch-jobs)
+15. [Settings](#settings)
+16. [API Reference](#api-reference)
 
 ---
 
@@ -33,29 +34,39 @@
 **Recommended (for training):**
 - CPU: Intel i7 / AMD Ryzen 7 or better
 - RAM: 16 GB+
-- GPU: NVIDIA RTX 3060+ with 8GB+ VRAM
-- Storage: SSD with 50GB+ free space
+- GPU: NVIDIA RTX 3060+ with 8 GB+ VRAM
+- Storage: SSD with 50 GB+ free space
 
 ### First Launch
 
 1. Start the application:
    ```bash
-   ./scripts/start.sh
+   python3 run.py start
    ```
 
 2. The application opens at `http://localhost:3000`
 
 3. **First step**: Go to **Settings** and verify the backend connection shows "Connected"
 
-4. **Load your first dataset**: Click "Datasets" → "Open Local Folder" → Navigate to your dataset
+4. **Load your first dataset**: Click **Datasets** → **Open Local Folder** → navigate to your dataset directory
+
+### Process Manager Commands
+
+```bash
+python3 run.py start           # Start both servers
+python3 run.py stop            # Stop cleanly
+python3 run.py restart         # Full restart
+python3 run.py restart-back    # Backend only
+python3 run.py restart-front   # Frontend only
+python3 run.py status          # Show PIDs and ports
+python3 run.py logs            # Tail live output from both servers
+```
 
 ### Understanding the Interface
 
-The interface is divided into:
-
-- **Sidebar (Left)**: Navigation between different views
-- **Main Area (Center)**: The active view content
-- **Dataset Indicator**: Shows currently selected dataset
+- **Sidebar (left)**: Navigation grouped into Data, Annotate, Process, Train, and Analyze sections
+- **Main area (center)**: The active view
+- **Dataset indicator**: Shows the currently selected dataset
 
 ---
 
@@ -63,77 +74,77 @@ The interface is divided into:
 
 ### Loading a Dataset
 
-**From Local Folder (Recommended):**
-1. Go to **Datasets** view
-2. Click **"Open Local Folder"**
+**From local folder (recommended):**
+1. Go to **Datasets**
+2. Click **Open Local Folder**
 3. Browse to your dataset directory
-4. The system auto-detects the format
-5. Click **"Load"**
+4. Format is auto-detected — no configuration needed
+5. Click **Load**
 
-**By Uploading:**
-1. Go to **Datasets** view
-2. Click **"Upload Dataset"**
-3. Drag & drop or select a ZIP file
+**By uploading a ZIP:**
+1. Go to **Datasets**
+2. Click **Upload Dataset**
+3. Select a ZIP file containing your dataset
 4. Wait for upload and processing
+
+### Supported Formats
+
+VisOS auto-detects all of the following on load, and can export to all of them:
+
+| Format | Notes |
+|---|---|
+| YOLO | Requires `data.yaml`, `images/`, `labels/` |
+| YOLO OBB | Oriented bounding boxes |
+| COCO | `annotations/*.json` |
+| COCO Panoptic | Panoptic segmentation variant |
+| Pascal VOC | `Annotations/*.xml`, `JPEGImages/` |
+| LabelMe | Per-image JSON files |
+| CreateML | Apple Create ML JSON format |
+| TensorFlow CSV | CSV with image paths and bbox columns |
+| ImageNet Classification | Class-name subfolders |
+| Cityscapes | `gtFine/` + `leftImg8bit/` structure |
+| ADE20K | `images/` + `annotations/` with index files |
+| DOTA | Aerial object detection with OBB |
+| TFRecord | TensorFlow TFRecord binary format |
 
 ### Supported Dataset Structures
 
-**YOLO Format:**
+**YOLO:**
 ```
 dataset/
-├── data.yaml           # Classes and paths
+├── data.yaml
 ├── images/
 │   ├── train/
-│   │   ├── image1.jpg
-│   │   └── image2.jpg
 │   └── val/
-│       └── image3.jpg
 └── labels/
     ├── train/
-    │   ├── image1.txt
-    │   └── image2.txt
     └── val/
-        └── image3.txt
 ```
 
-**COCO Format:**
+**COCO:**
 ```
 dataset/
 ├── annotations/
 │   ├── instances_train.json
 │   └── instances_val.json
 ├── train/
-│   ├── image1.jpg
-│   └── image2.jpg
 └── val/
-    └── image3.jpg
 ```
 
-**Pascal VOC Format:**
+**Pascal VOC:**
 ```
 dataset/
-├── Annotations/
-│   ├── image1.xml
-│   └── image2.xml
-├── ImageSets/
-│   └── Main/
-│       ├── train.txt
-│       └── val.txt
-└── JPEGImages/
-    ├── image1.jpg
-    └── image2.jpg
+├── Annotations/       ← .xml files
+├── ImageSets/Main/    ← train.txt, val.txt
+└── JPEGImages/        ← images
 ```
 
-**Classification (ImageNet-style):**
+**ImageNet-style Classification:**
 ```
 dataset/
 ├── train/
 │   ├── cat/
-│   │   ├── cat1.jpg
-│   │   └── cat2.jpg
 │   └── dog/
-│       ├── dog1.jpg
-│       └── dog2.jpg
 └── val/
     ├── cat/
     └── dog/
@@ -141,109 +152,107 @@ dataset/
 
 ### Dataset Dashboard
 
-After loading a dataset, the dashboard shows:
-
-- **Total Images**: Number of images in dataset
-- **Total Annotations**: Number of annotation objects
-- **Classes**: List of all classes with counts
-- **Train/Val/Test Split**: Distribution chart
-- **Annotation Coverage**: % of images with annotations
-- **Format**: Detected format type
+After loading, the dashboard shows image count, total annotation objects, class distribution chart, train/val/test split breakdown, annotation coverage percentage, and detected format.
 
 ---
 
 ## Sorting & Filtering
 
-The sorting view lets you quickly review and clean your dataset.
-
 ### Basic Usage
 
-1. Select a dataset from the Datasets view
-2. Navigate to **Sort & Filter**
-3. Images display one at a time with annotations overlaid
-4. Use arrow keys:
+1. Select a dataset
+2. Go to **Sort & Filter**
+3. Images display one at a time with annotation overlays
+4. Use keyboard:
    - **← Left Arrow**: Mark for deletion
-   - **→ Right Arrow**: Keep image
-5. Progress bar shows your position
-6. Click **"Apply Changes"** to finalize deletions
+   - **→ Right Arrow**: Keep
+5. Click **Apply Changes** to commit deletions
 
-### Advanced Filtering
+### Filtering Options
 
-**Filter by Annotation Status:**
-- All images
-- Annotated only
-- Unannotated only
-
-**Filter by Class:**
-- Select specific classes to review
-- Useful for checking annotation quality per class
-
-**Filter by Confidence:**
-- If annotations have confidence scores
-- Set minimum threshold
+- **Annotation status**: All / annotated only / unannotated only
+- **Class**: Filter to images containing a specific class
 
 ### Batch Operations
 
-- **Select Multiple**: Shift+click to select range
-- **Delete Selected**: Remove all selected images
-- **Move Selected**: Move to different split (train → val)
+- **Shift-click**: Select a range of images
+- **Delete selected**: Remove all selected images
+- **Move selected**: Move to a different split (e.g. train → val)
 
 ---
 
 ## Annotation Tools
 
-### Tool Overview
+### Keyboard Shortcuts
 
-| Tool | Shortcut | Use Case |
-|------|----------|----------|
-| Bounding Box | B | Object detection |
-| Polygon | P | Instance segmentation |
-| Brush | - | Semantic segmentation |
-| Point | L | Keypoint detection |
-| Select | V | Edit existing annotations |
+| Tool | Shortcut |
+|---|---|
+| Select / Edit | V |
+| Bounding Box | B |
+| Polygon | P |
+| Keypoint | K |
+| Brush | R |
+| SAM Wand | Q |
+| Save | S |
+| Undo | Ctrl+Z |
+| Delete selected | Delete / Backspace |
+| Previous image | Alt+← |
+| Next image | Alt+→ |
+| Close polygon | Enter |
+| Cancel / Deselect | Escape |
 
-### Creating Bounding Boxes
+### Bounding Box
 
-1. Press **B** or select Bounding Box tool
-2. Click and drag to create rectangle
+1. Press **B**
+2. Click and drag to draw
 3. Release to complete
-4. Select class from sidebar
-5. Annotation auto-saves
+4. Select class from the right panel
 
-### Creating Polygons
+### Polygon
 
-1. Press **P** or select Polygon tool
-2. Click to add vertices
-3. Double-click or press Enter to complete
-4. Polygon automatically closes
-5. Select class from sidebar
+1. Press **P**
+2. Click to place each vertex
+3. Press **Enter** or double-click to close
+4. Select class from the right panel
+
+### Keypoint
+
+1. Press **K**
+2. Click to place each point
+3. Each point is assigned the active class label
+
+### Brush
+
+1. Press **R**
+2. Click and drag to paint a region
+3. Used for semantic segmentation masks
+
+### SAM Wand
+
+1. Press **Q** (or load a SAM model — the tool activates automatically)
+2. Click on an object to generate a segmentation mask
+3. For SAM 3: enter a text prompt as tags to guide what the model segments
+4. Confirm or reject the generated mask
 
 ### Editing Annotations
 
-1. Press **V** or select Select tool
-2. Click on annotation to select
-3. Drag corners/edges to resize
-4. Drag center to move
-5. Press **Delete** to remove
-
-### Annotation History
-
-Every action is recorded:
-- **Ctrl+Z**: Undo last action
-- **Ctrl+Y**: Redo
-- View full history in sidebar panel
-- Click any history item to jump to that state
+1. Press **V**
+2. Click an annotation to select it
+3. Drag corners/edges to resize; drag center to move
+4. Press **Delete** to remove
 
 ### Auto-Annotation
 
+Run model inference across your entire dataset:
+
 1. Ensure a model is loaded (see Model Management)
-2. Click **"Auto-Annotate"** button
+2. Click **Auto-Annotate**
 3. Configure:
-   - **Model**: Select loaded model
-   - **Confidence**: Minimum confidence threshold (0.1-1.0)
-   - **Classes**: Which classes to detect (or all)
-4. Click **"Run"**
-5. Review results in Sort view
+   - **Model**: select loaded model
+   - **Confidence threshold**: minimum confidence (0.1–1.0)
+   - **Text prompt** (GroundingDINO only): comma-separated class names for zero-shot detection
+4. Click **Run**
+5. Review results in Sort & Filter
 
 ---
 
@@ -251,65 +260,44 @@ Every action is recorded:
 
 ### Viewing Classes
 
-1. Go to **Classes** view
-2. See all classes in current dataset
-3. Each class shows:
-   - Name
-   - Color (for visualization)
-   - Annotation count
-   - Image count
+Go to **Classes** to see all classes in the current dataset with name, colour, annotation count, and image count.
 
-### Extract Classes to New Dataset
+### Extract Classes to a New Dataset
 
-Extract specific classes into a separate dataset:
+Pull a subset of classes into a standalone dataset:
 
-1. Select classes to extract (checkbox)
-2. Click **"Extract Selected"**
-3. Enter new dataset name
+1. Check the classes to extract
+2. Click **Extract Selected**
+3. Enter a name for the new dataset
 4. Choose output format
-5. Click **"Extract"**
-
-**Use Case**: You have a dataset with 80 classes but only need 5 for your project.
+5. Click **Extract**
 
 ### Delete Classes
 
-Remove unwanted classes and their annotations:
+Remove classes and all their annotations:
 
-1. Select classes to delete
-2. Click **"Delete Selected"**
-3. Confirm the action
-4. All annotations of those classes are removed
-
-**Use Case**: Remove background detections or irrelevant classes.
+1. Check the classes to delete
+2. Click **Delete Selected**
+3. Confirm — all annotations of those classes are permanently removed
 
 ### Merge Classes
 
-Combine multiple classes into one:
+Collapse multiple class names into one:
 
-1. Select classes to merge (2+)
-2. Click **"Merge Selected"**
-3. Enter target class name
-4. Choose which class name to use, or enter new
-5. Click **"Merge"**
+1. Check the classes to merge (2 or more)
+2. Click **Merge Selected**
+3. Enter the target class name
+4. Click **Merge**
 
-**Use Case**: Merge "car", "automobile", "vehicle" into single "vehicle" class.
+Example: merging `car`, `automobile`, `vehicle` → `vehicle`
 
-### Rename Classes
+### Rename a Class
 
-Rename a single class:
+Click the edit icon next to any class name, type the new name, and press Enter.
 
-1. Click the edit icon next to class name
-2. Enter new name
-3. Press Enter or click Save
+### Add a Class
 
-### Add New Classes
-
-Add classes for manual annotation:
-
-1. Click **"+ Add Class"**
-2. Enter class name
-3. Optionally set color
-4. Class is now available in annotation tools
+Click **+ Add Class**, enter a name, and optionally set a colour. The class is immediately available in the annotation tools.
 
 ---
 
@@ -317,409 +305,290 @@ Add classes for manual annotation:
 
 ### Overview
 
-Data augmentation artificially increases dataset size by applying transformations.
+Build an augmentation pipeline to artificially expand your dataset. Preview outputs before committing, then generate to a target image count or a multiplier of the original.
 
-### Available Augmentations
+### Available Transforms
 
 **Geometric:**
-| Augmentation | Description | Parameters |
-|--------------|-------------|------------|
-| Horizontal Flip | Mirror left-right | Probability |
-| Vertical Flip | Mirror top-bottom | Probability |
-| Rotation | Rotate image | Angle range (-180 to 180) |
-| Random Crop | Crop portion | Min/max scale |
-| Resize | Change dimensions | Target size |
-| Perspective | 3D perspective change | Strength |
 
-**Color:**
-| Augmentation | Description | Parameters |
-|--------------|-------------|------------|
-| Brightness | Lighter/darker | Range (-1 to 1) |
-| Contrast | Increase/decrease contrast | Range (0.5 to 2.0) |
-| Saturation | Color intensity | Range (0 to 2.0) |
-| Hue Shift | Shift color wheel | Range (-180 to 180) |
+| Transform | Parameters |
+|---|---|
+| Horizontal Flip | probability |
+| Vertical Flip | probability |
+| Rotation | angle range |
+| Random Scale | scale range |
+| Translation | shift range |
+| Shear | shear range |
+| Perspective | strength |
+| Random Crop | crop size range |
+
+**Colour:**
+
+| Transform | Parameters |
+|---|---|
+| Brightness | range |
+| Contrast | range |
+| Saturation | range |
+| Hue Shift | range |
+| Grayscale | probability |
+| Histogram Equalisation | — |
+| Channel Shuffle | probability |
+| Invert | probability |
+| Posterize | bits |
+| Solarize | threshold |
 
 **Noise & Blur:**
-| Augmentation | Description | Parameters |
-|--------------|-------------|------------|
-| Gaussian Blur | Soft blur | Kernel size |
-| Motion Blur | Directional blur | Kernel size, angle |
-| Gaussian Noise | Random noise | Mean, variance |
+
+| Transform | Parameters |
+|---|---|
+| Gaussian Blur | kernel size |
+| Gaussian Noise | mean, variance |
+| Sharpen | strength |
+| JPEG Compression | quality range |
 
 **Advanced:**
-| Augmentation | Description | Parameters |
-|--------------|-------------|------------|
-| Mosaic | Combine 4 images | - |
-| MixUp | Blend 2 images | Alpha |
-| CutOut | Random erasing | Size, count |
 
-### Creating an Augmentation Pipeline
+| Transform | Parameters |
+|---|---|
+| Mosaic | combines 4 images |
+| MixUp | alpha (blend ratio) |
+| Cutout | hole count, size range |
+| Elastic Deformation | alpha, sigma |
+| Grid Distortion | steps, distort limit |
 
-1. Go to **Augmentation** view
+### Running Augmentation
+
+1. Go to **Augmentation**
 2. Select source dataset
-3. Set target size:
-   - **Exact count**: e.g., 10,000 images
-   - **Multiplier**: e.g., 5x current size
-4. Enable desired augmentations
-5. Configure strength/parameters
-6. Click **"Preview"** to see examples
-7. Click **"Apply"** to generate
-
-### Presets
-
-Quick presets for common scenarios:
-
-- **Light**: Flip + small rotation + brightness
-- **Medium**: Light + crop + color jitter + blur
-- **Heavy**: All transforms at moderate strength
-
-### Best Practices
-
-- Always keep **"Preserve Originals"** checked
-- Start with light augmentation, increase if needed
-- Don't over-augment (2-5x is usually sufficient)
-- Match augmentations to real-world conditions
+3. Set target size (exact count or multiplier)
+4. Toggle transforms and adjust sliders
+5. Click **Preview** to see sample outputs
+6. Click **Apply** to generate the augmented dataset
 
 ---
 
 ## Video Frame Extraction
 
-### Overview
-
-Create image datasets from video files by extracting frames.
-
 ### Extraction Modes
 
-**Every Nth Frame:**
-- Extract every 30th frame (1 frame per second at 30fps)
-- Good for: Continuous footage with slow changes
-
-**Uniform Distribution:**
-- Extract exactly N frames spread evenly across video
-- Good for: Getting representative sample of video
-
-**Keyframe Detection:**
-- Extract frames at scene changes
-- Good for: Videos with distinct scenes
-
-**Manual Selection:**
-- Scrub through video and mark frames
-- Good for: Precise control over what's extracted
+| Mode | Use case |
+|---|---|
+| Every Nth frame | Continuous footage with gradual change |
+| Uniform distribution | Representative sample across full video |
+| Keyframe detection | Videos with distinct scene cuts |
+| Manual selection | Precise per-frame control |
 
 ### How to Extract
 
-1. Go to **Video Frames** view
-2. Click **"Select Video"** or drag & drop
-3. Video preview loads
-4. Choose extraction mode
-5. Configure:
-   - Frame interval or count
-   - Start/end time (optional)
-   - Maximum frames (optional)
-6. Click **"Extract"**
-7. New dataset is created with extracted frames
+1. Go to **Video Frames**
+2. Select or drop a video file
+3. Choose extraction mode and configure parameters
+4. Optionally set start/end time or a maximum frame count
+5. Click **Extract** — a new dataset is created ready to annotate
 
-### Supported Video Formats
+### Supported Formats
 
-- MP4 (H.264, H.265)
-- AVI
-- MOV
-- MKV
-- WebM
+MP4 · AVI · MOV · MKV · WebM
 
 ---
 
 ## Duplicate Detection
 
-### Overview
+### Methods
 
-Find and remove duplicate or near-duplicate images to clean your dataset.
+| Method | What it finds | Speed |
+|---|---|---|
+| MD5 Hash | Exact byte-for-byte duplicates | Fastest |
+| Average Hash (aHash) | Fast approximate visual similarity | Fast |
+| Perceptual Hash (pHash) | Visually similar (resize-robust) | Medium |
+| CLIP Embeddings | Semantically similar content | Slowest |
 
-### Detection Methods
+### How to Find and Remove Duplicates
 
-**MD5 Hash:**
-- Detects **exact** duplicates only
-- Fastest method
-- Use when: You suspect exact copies exist
-
-**Perceptual Hash (pHash):**
-- Detects **visually similar** images
-- Robust to resizing, minor edits
-- Use when: Similar but not identical images
-
-**Average Hash (aHash):**
-- Faster than pHash, less accurate
-- Good for quick scanning
-- Use when: Large datasets, initial pass
-
-**CLIP Embeddings:**
-- AI-powered semantic similarity
-- Finds images with similar content, not just appearance
-- Use when: Finding conceptually similar images
-
-### How to Find Duplicates
-
-1. Go to **Datasets** view
-2. Select dataset
-3. Click **"Find Duplicates"**
-4. Choose method
-5. Set similarity threshold:
-   - Higher = stricter matching
-   - Lower = more matches found
-6. Click **"Scan"**
-7. Review duplicate groups
-8. Choose keep strategy:
-   - **First**: Keep first image in group
-   - **Largest**: Keep highest resolution
-   - **Smallest**: Keep smallest file size
-9. Click **"Remove Duplicates"**
+1. Go to **Duplicates**
+2. Select a dataset
+3. Choose detection method
+4. Set similarity threshold (higher = stricter)
+5. Click **Scan**
+6. Review duplicate groups
+7. Choose keep strategy: **First**, **Largest resolution**, or **Smallest file size**
+8. Click **Remove Duplicates**
 
 ---
 
 ## Dataset Splitting
 
-### Overview
-
-Split a single dataset into train/validation/test sets.
+The **Train / Val / Test** view creates train/validation/test splits from a single dataset.
 
 ### How to Split
 
-1. Go to **Convert** view
-2. Select dataset
-3. Enable **"Create Splits"**
-4. Set ratios:
-   - Train: 70% (default)
-   - Validation: 20% (default)
-   - Test: 10% (default)
-5. Options:
-   - **Shuffle**: Randomize order (recommended)
-   - **Seed**: For reproducible splits
-   - **Stratified**: Maintain class distribution
-6. Click **"Split"**
+1. Go to **Train / Val / Test**
+2. Select a dataset
+3. Set split ratios (default: 70 / 20 / 10)
+4. Configure options:
+   - **Seed**: fixed integer for reproducible splits (default: 42)
+   - **Stratified**: maintain class distribution across splits
+5. Enter an output name
+6. Click **Split**
 
 ### Stratified Splitting
 
-When enabled, each split will have approximately the same class distribution as the original dataset.
-
-Example:
-- Original: 60% cats, 40% dogs
-- Train: 60% cats, 40% dogs
-- Val: 60% cats, 40% dogs
-- Test: 60% cats, 40% dogs
+When enabled, each split preserves the class proportions of the original dataset. Example: if the source is 60% cats and 40% dogs, each of train/val/test will be approximately 60/40.
 
 ---
 
 ## Format Conversion
 
-### Overview
-
-Convert datasets between any supported formats.
-
-### Supported Conversions
-
-| From/To | YOLO | COCO | VOC | CSV | JSON |
-|---------|------|------|-----|-----|------|
-| YOLO | - | Yes | Yes | Yes | Yes |
-| COCO | Yes | - | Yes | Yes | Yes |
-| VOC | Yes | Yes | - | Yes | Yes |
-| CSV | Yes | Yes | Yes | - | Yes |
-| JSON | Yes | Yes | Yes | Yes | - |
-
 ### How to Convert
 
-1. Go to **Convert** view
-2. Select source dataset
+1. Go to **Convert Format**
+2. Select a source dataset (format is auto-detected)
 3. Choose target format
 4. Configure options:
    - Output name
-   - Include images (copy) or just annotations
-   - Split ratios (optional)
-5. Click **"Convert"**
-6. New dataset is created in target format
+   - Copy images alongside annotations, or annotations only
+5. Click **Convert** — a new dataset appears in the list
 
-### Format-Specific Options
+### Supported Conversions
 
-**YOLO:**
-- Image path style (relative/absolute)
-- Create data.yaml
+All 13 supported formats can be converted to and from each other:
 
-**COCO:**
-- Include segmentation masks
-- Category ID starting number
-
-**Pascal VOC:**
-- Include difficult flag
-- Folder structure style
+YOLO ↔ YOLO OBB ↔ COCO ↔ COCO Panoptic ↔ Pascal VOC ↔ LabelMe ↔ CreateML ↔ TensorFlow CSV ↔ ImageNet ↔ Cityscapes ↔ ADE20K ↔ DOTA ↔ TFRecord
 
 ---
 
 ## Dataset Merging
 
-### Overview
-
-Combine multiple datasets into one unified dataset.
-
 ### How to Merge
 
-1. Go to **Merge** view
-2. Click **"+ Add Dataset"**
-3. Select first dataset
-4. Repeat for additional datasets
-5. Configure:
-   - Output name
-   - Output format
-   - Class mapping (if needed)
-6. Click **"Merge"**
+1. Go to **Merge**
+2. Click **+ Add Dataset** and select each dataset to include
+3. Resolve any class naming conflicts in the mapping table
+4. Choose output name and format
+5. Click **Merge**
 
 ### Class Mapping
 
-When merging datasets with different class names:
+When merging datasets that use different names for the same thing, the mapping table lets you assign each source class to a target class (or exclude it). Example:
 
-1. View the class mapping table
-2. For each source class, choose:
-   - Map to existing class
-   - Create new class
-   - Exclude (don't include)
-3. Resolve conflicts
-
-Example:
 ```
-Dataset 1: cat, dog, bird
-Dataset 2: feline, canine, avian
+Dataset A: cat, dog
+Dataset B: feline, canine
 
 Mapping:
-- cat → cat
-- feline → cat
-- dog → dog
-- canine → dog
-- bird → bird
-- avian → bird
+  feline → cat
+  canine → dog
 ```
 
 ---
 
 ## Model Management
 
-### Overview
+### Available Pretrained Models
 
-Load, manage, and download models for auto-annotation and training.
+**YOLO family:**
+- YOLOv5 Nano, Small
+- YOLOv8 Nano / Small / Medium / Large / XLarge
+- YOLOv8 Seg variants (n/s/m) — instance segmentation
+- YOLOv8 Cls variants (n/s) — classification
+- YOLOv9 Nano / Small / Medium / Compact / Extended
+- YOLOv10 Nano / Small / Medium / Balanced / Large / XLarge
 
-### Available Models
+**Transformer-based detection:**
+- RT-DETR Large, XLarge
+- RF-DETR Base, Large
 
-**YOLO Family:**
-- YOLOv8n (3.2M params, 6.3 MB)
-- YOLOv8s (11.2M params, 22 MB)
-- YOLOv8m (25.9M params, 52 MB)
-- YOLOv8l (43.7M params, 87 MB)
-- YOLOv8x (68.2M params, 136 MB)
+**Segmentation (SAM):**
+- SAM ViT-B, ViT-L
+- SAM 2 Tiny / Small / Base+ / Large
+- SAM 2.1 Tiny / Small / Base+ / Large
+- SAM 3
 
-**SAM (Segment Anything):**
-- SAM ViT-B (91M params, 375 MB)
-- SAM ViT-L (308M params, 1.2 GB)
-- SAM ViT-H (636M params, 2.4 GB)
-
-**RT-DETR:**
-- RT-DETR-L (32M params, 64 MB)
-- RT-DETR-X (67M params, 134 MB)
+**Zero-shot detection:**
+- GroundingDINO Tiny
+- GroundingDINO Base
 
 ### Downloading Models
 
-1. Go to **Models** view
-2. Find model in "Download Models" section
-3. Click download icon
-4. Wait for download (progress shown)
-5. Model appears in "Your Models"
+1. Go to **Models**
+2. Find the model in the available list
+3. Click **Download** — progress is shown inline
+4. Once downloaded, click **Load** to make it available for inference
 
 ### Importing Custom Models
 
-1. Go to **Models** view
-2. Click **"Import Model"**
-3. Select model file (.pt, .pth, .onnx)
-4. Configure:
-   - Model name
-   - Type (detection/segmentation)
-   - Class names (if known)
-5. Click **"Import"**
+1. Go to **Models**
+2. Click **Import Model**
+3. Select a `.pt`, `.pth`, or `.onnx` file
+4. Configure name and type
+5. Click **Import**
 
-### Loading/Unloading Models
+### Loading and Unloading
 
-- **Load**: Click "Load" to make model available for inference
-- **Unload**: Click "Unload" to free GPU memory
-- Only loaded models can be used for auto-annotation
+Click **Load** to move a model into GPU memory for inference. Click **Unload** to free that memory. Only loaded models are available for auto-annotation.
 
 ---
 
 ## Training
 
-### Overview
-
-Train object detection and segmentation models locally.
-
 ### Supported Architectures
 
-- YOLOv8 (n/s/m/l/x)
-- YOLOv9 (c/e)
-- RT-DETR (l/x)
+| Architecture | Task types |
+|---|---|
+| YOLOv8 (n/s/m/l/x) | Detection |
+| YOLOv8 Seg (n/s/m) | Instance segmentation |
+| YOLOv8 Cls (n/s) | Classification |
+| YOLOv9 (n/s/m/c/e) | Detection |
+| YOLOv10 (n/s/m/b/l/x) | Detection |
+| RF-DETR Base / Large | Detection |
 
-### Training Configuration
+### How to Start Training
 
-**Dataset:**
-- Select from loaded datasets
-- Must be in compatible format
+1. Go to **Training**
+2. Select a dataset
+3. Choose an architecture
+4. Configure hyperparameters:
+   - **Epochs**: number of training passes
+   - **Batch size**: images per step
+   - **Image size**: input resolution
+   - **Learning rate**
+   - **Early-stopping patience**: stop if val loss doesn't improve for N epochs
+5. Click **Start Training**
 
-**Model:**
-- Choose architecture
-- Use pretrained weights (recommended)
+### Live Monitoring
 
-**Hyperparameters:**
-- **Epochs**: Training iterations (10-500)
-- **Batch Size**: Images per batch (1-64)
-- **Image Size**: Input resolution (320-1280)
-- **Learning Rate**: Step size (0.001-0.1)
-- **Patience**: Early stopping patience
+Training metrics update in real time:
+- Loss and validation loss curves
+- Accuracy curve
+- GPU memory usage
+- Current epoch and ETA
 
-**Augmentation:**
-- Enable/disable training augmentation
-- Uses sensible defaults when enabled
+### Controls
 
-### Starting Training
+- **Pause**: suspend training and save state
+- **Resume**: continue from pause
+- **Stop**: end training and save a checkpoint
 
-1. Go to **Training** view
-2. Select dataset
-3. Choose model architecture
-4. Configure hyperparameters
-5. Click **"Start Training"**
-
-### Monitoring Training
-
-Real-time metrics displayed:
-- **Loss**: Should decrease over time
-- **Accuracy**: Should increase over time
-- **Validation Loss**: Watch for overfitting
-- **Learning Rate**: Current LR after scheduling
-
-System metrics:
-- GPU usage percentage
-- Memory usage
-- Training speed (iterations/second)
-- ETA (estimated time remaining)
-
-### Training Controls
-
-- **Pause**: Temporarily stop training
-- **Resume**: Continue paused training
-- **Stop**: End training and save checkpoint
-
-### Exporting Trained Models
+### Exporting Trained Weights
 
 After training completes:
-1. Find model in **Models** view
-2. Click **"Export"**
-3. Choose format:
-   - PyTorch (.pt)
-   - ONNX (.onnx)
-   - TensorRT (.engine)
-4. Download or save to path
+1. Go to **Models**
+2. Find the trained model
+3. Click **Export**
+4. Choose format: PyTorch (`.pt`), ONNX (`.onnx`), or TensorRT (`.engine`)
+
+---
+
+## Batch Jobs
+
+The **Batch Jobs** view tracks background auto-annotation jobs. Each job shows:
+
+- Status (running / paused / done / error)
+- Per-image progress with counts of annotated vs failed
+- Inline preview of recently annotated images
+- Pause, resume, and cancel controls
+
+Jobs survive page navigation and can be restored after a backend restart.
 
 ---
 
@@ -727,218 +596,143 @@ After training completes:
 
 ### Backend Connection
 
-Configure the Python backend URL:
-- Default: `http://localhost:8000`
-- Click "Test" to verify connection
+Set the Python backend URL (default: `http://localhost:8000`). Click **Test Connection** to verify.
 
 ### Storage Paths
 
-Set default directories:
-- **Models Directory**: Where to save downloaded/trained models
-- **Datasets Directory**: Default dataset storage location
-- **Output Directory**: Where to save exports
+- **Models directory**: where downloaded and trained weights are saved
+- **Datasets directory**: default location for loaded datasets
+- **Output directory**: where converted and augmented datasets are written
 
 ### Hardware
 
-Configure compute settings:
-- **Use GPU**: Enable CUDA/MPS acceleration
-- **GPU Device**: Select GPU if multiple available
-
-### Preferences
-
-- **Dark Mode**: Toggle dark/light theme
-- **Auto-Save**: Automatically save annotation progress
-- **Notifications**: Show completion alerts
+- **GPU Device ID**: select which GPU to use if multiple are available
 
 ---
 
 ## API Reference
 
 ### Base URL
+
 ```
 http://localhost:8000/api
 ```
 
-### Authentication
-No authentication required for local use.
+Interactive Swagger docs available at `http://localhost:8000/docs` while the backend is running. No authentication required for local use.
 
-### Endpoints
+### Datasets
 
-#### Datasets
-
-**List Datasets**
 ```
-GET /datasets
-Response: { datasets: Dataset[] }
-```
-
-**Load Local Dataset**
-```
-POST /datasets/load-local
-Body: { folder_path: string, format_hint?: string }
-Response: { success: boolean, dataset: Dataset }
+GET    /datasets                          List all loaded datasets
+POST   /datasets/load-local              Load from a local folder path
+POST   /datasets/upload                  Upload a ZIP file
+GET    /datasets/{id}                    Dataset details
+DELETE /datasets/{id}                    Unload and delete
+GET    /datasets/{id}/images             Paginated image list (?page&limit&filter)
+GET    /datasets/{id}/images/{image_id}  Image with annotations
+PUT    /datasets/{id}/images/{image_id}/annotations  Update annotations
 ```
 
-**Get Dataset**
+### Class Operations
+
 ```
-GET /datasets/{id}
-Response: Dataset
+POST /datasets/{id}/extract-classes      Extract classes → new dataset
+POST /datasets/{id}/delete-classes       Delete classes and annotations
+POST /datasets/{id}/merge-classes        Merge N classes into one
 ```
 
-**Delete Dataset**
+### Augmentation
+
 ```
-DELETE /datasets/{id}
-Response: { success: boolean }
+GET  /augmentations/list                 List available transforms
+POST /datasets/{id}/augment-enhanced     Apply augmentation pipeline
 ```
 
-#### Images
+### Video
 
-**List Images**
 ```
-GET /datasets/{id}/images
-Query: ?page=1&limit=50&filter=annotated
-Response: { images: Image[], total: number }
+POST /video/extract                      Extract frames from a video file
 ```
 
-**Get Image**
+### Duplicates
+
 ```
-GET /datasets/{id}/images/{image_id}
-Response: Image with annotations
+POST /datasets/{id}/find-duplicates      Scan for duplicates
+POST /datasets/{id}/remove-duplicates    Remove with a keep strategy
 ```
 
-**Update Annotations**
+### Conversion & Merging
+
 ```
-PUT /datasets/{id}/images/{image_id}/annotations
-Body: { annotations: Annotation[] }
-Response: { success: boolean }
+POST /datasets/{id}/convert              Convert to another format
+POST /datasets/merge                     Merge multiple datasets
+GET  /formats                            List supported formats
 ```
 
-#### Classes
+### Models
 
-**Extract Classes**
 ```
-POST /datasets/{id}/extract-classes
-Body: { classes: string[], output_name: string }
-Response: { success: boolean, new_dataset: Dataset }
-```
-
-**Delete Classes**
-```
-POST /datasets/{id}/delete-classes
-Body: { classes: string[] }
-Response: { success: boolean, deleted_count: number }
+GET  /models                             List available and downloaded models
+POST /models/download                    Download a pretrained model
+POST /models/import                      Import a local model file
+POST /models/{id}/load                   Load model into memory
+POST /models/{id}/unload                 Unload model
+POST /datasets/{id}/auto-annotate        Run inference on a dataset
 ```
 
-**Merge Classes**
+### Auto-Annotation Batch Jobs
+
 ```
-POST /datasets/{id}/merge-classes
-Body: { source_classes: string[], target_class: string }
-Response: { success: boolean, merged_count: number }
+GET  /api/auto-annotate/jobs             List all batch annotation jobs
 ```
 
-#### Augmentation
+### Training
 
-**List Augmentations**
 ```
-GET /augmentations/list
-Response: { augmentations: AugmentationOption[] }
-```
-
-**Apply Augmentation**
-```
-POST /datasets/{id}/augment-enhanced
-Body: { 
-  output_name: string,
-  target_size: number,
-  augmentations: { [key: string]: AugmentationConfig }
-}
-Response: { success: boolean, new_dataset: Dataset }
+POST /training/start                     Start a training job
+GET  /training/{job_id}/status           Metrics and status
+POST /training/{job_id}/pause            Pause
+POST /training/{job_id}/resume           Resume
+POST /training/{job_id}/stop             Stop and save checkpoint
 ```
 
-#### Video
+### System
 
-**Extract Frames**
 ```
-POST /video/extract
-Body: {
-  video_path: string,
-  output_name: string,
-  nth_frame: number,
-  max_frames?: number
-}
-Response: { success: boolean, dataset: Dataset, extracted_frames: number }
-```
-
-#### Duplicates
-
-**Find Duplicates**
-```
-POST /datasets/{id}/find-duplicates
-Body: { method: string, threshold: number }
-Response: { groups: DuplicateGroup[] }
-```
-
-**Remove Duplicates**
-```
-POST /datasets/{id}/remove-duplicates
-Body: { groups: DuplicateGroup[], keep_strategy: string }
-Response: { success: boolean, removed_count: number }
-```
-
-#### Training
-
-**Start Training**
-```
-POST /training/start
-Body: {
-  dataset_id: string,
-  model_arch: string,
-  epochs: number,
-  batch_size: number,
-  ...config
-}
-Response: { job_id: string }
-```
-
-**Get Training Status**
-```
-GET /training/{job_id}/status
-Response: { status: string, metrics: TrainingMetrics }
+GET /api/health                          Backend health check
 ```
 
 ---
 
 ## Troubleshooting
 
-### Common Issues
+**"Backend not connected"**  
+Python failed to start. Check `.logs/backend.log`. Common causes: Python < 3.10, port 8000 already in use, missing OpenCV system dependency.
 
-**"Backend not connected"**
-1. Ensure Python backend is running
-2. Check port 8000 is not in use
-3. Verify firewall allows connection
+**First startup hangs for a long time**  
+Normal. PyTorch and Ultralytics are large (~1.5 GB total). Watch `.logs/backend.log` for pip's progress.
 
-**"Dataset format not recognized"**
-1. Check folder structure matches supported formats
-2. Try specifying format manually
-3. Ensure annotation files are valid
+**"Dataset format not recognized"**  
+Auto-detection looks for specific files (`data.yaml`, `instances_train.json`, `Annotations/*.xml`, etc). Make sure your folder structure matches exactly. Nested ZIPs inside a ZIP are not supported — extract first.
 
-**"Out of memory during training"**
-1. Reduce batch size
-2. Reduce image size
-3. Use smaller model architecture
-4. Close other GPU applications
+**Out of memory during training**  
+Reduce batch size (try 4–8), reduce image size (try 320), or switch to a smaller architecture (`yolov8n`). Check VRAM with `nvidia-smi`. Close other GPU applications.
 
-**"Model not loading"**
-1. Check model file is not corrupted
-2. Verify model format is supported
-3. Ensure sufficient GPU memory
+**Port 3000 or 8000 still in use after a crash**  
+Run `python3 run.py stop`. If that fails:  
+macOS/Linux: `lsof -ti:3000 | xargs kill -9` and `lsof -ti:8000 | xargs kill -9`  
+Windows: `netstat -ano | findstr :3000` → `taskkill /F /PID <pid>`
 
-### Getting Help
+**Blank frontend or 500 error**  
+Run `npm install` manually in the project root, then `python3 run.py restart-front`. Check `.logs/frontend.log` for the cause.
 
-- GitHub Issues: Report bugs and request features
-- Documentation: This file and README.md
-- API Docs: http://localhost:8000/docs
+**Model not loading**  
+Check that the file isn't corrupted and that you have sufficient GPU memory. Try unloading other models first.
 
 ---
 
-*Documentation version 2.0.0*
+> ⚠️ The FastAPI backend serves files directly from your local filesystem. Do not expose port 8000 to the public internet without authentication. For remote GPU servers use SSH port forwarding: `ssh -L 3000:localhost:3000 -L 8000:localhost:8000 user@server`
+
+---
+
+*VisOS Documentation*

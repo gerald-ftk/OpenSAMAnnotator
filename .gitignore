@@ -1,25 +1,28 @@
 # Node / Next.js
 node_modules/
 .next/
-
+ 
 # Logs
 .logs/
 *.log
-
+ 
 # Python
 __pycache__/
 venv/
-
+ 
 # Backend heavy data
 backend/workspace/
 backend/runs/
-
+ 
 # Claude
 .claude/
-
-
+ 
+ 
 # Misc
 .env
 .DS_Store
 package.json
 package-lock.json
+.pids.json
+*.tsbuildinfo
+ 
