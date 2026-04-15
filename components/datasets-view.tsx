@@ -5,11 +5,21 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { 
-  Upload, 
-  FolderOpen, 
-  Trash2, 
+import {
+  Upload,
+  FolderOpen,
+  Trash2,
   Download,
   Database,
   Image,
@@ -21,7 +31,10 @@ import {
   ChevronRight,
   HardDrive,
   RefreshCw,
-  Loader2
+  Loader2,
+  Pencil,
+  Check,
+  X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { Dataset } from '@/app/page'
@@ -64,6 +77,12 @@ export function DatasetsView({
   const [folderItems, setFolderItems] = useState<FolderItem[]>([])
   const [isLoadingFolder, setIsLoadingFolder] = useState(false)
   const [manualPath, setManualPath] = useState('')
+
+  // Inline rename + delete confirmation state
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+  const [renameValue, setRenameValue] = useState('')
+  const [isRenaming, setIsRenaming] = useState(false)
+  const [datasetToDelete, setDatasetToDelete] = useState<Dataset | null>(null)
 
   // Fetch datasets from backend on mount and whenever apiUrl changes.
   // This restores the list after a page refresh or backend restart.
@@ -280,7 +299,9 @@ export function DatasetsView({
     }
   }
 
-  const handleDelete = async (datasetId: string) => {
+  const handleConfirmDelete = async () => {
+    if (!datasetToDelete) return
+    const datasetId = datasetToDelete.id
     try {
       const response = await fetch(`${apiUrl}/api/datasets/${datasetId}`, { method: 'DELETE' })
       if (response.ok) {
@@ -291,9 +312,57 @@ export function DatasetsView({
         }
         setSuccess('Dataset removed')
         setTimeout(() => setSuccess(null), 3000)
+      } else {
+        setError('Failed to delete dataset')
       }
     } catch (err) {
       setError('Failed to delete dataset')
+    } finally {
+      setDatasetToDelete(null)
+    }
+  }
+
+  const startRename = (dataset: Dataset) => {
+    setRenamingId(dataset.id)
+    setRenameValue(dataset.name)
+  }
+
+  const cancelRename = () => {
+    setRenamingId(null)
+    setRenameValue('')
+  }
+
+  const commitRename = async () => {
+    if (!renamingId) return
+    const trimmed = renameValue.trim()
+    const original = datasets.find(d => d.id === renamingId)
+    if (!original || !trimmed || trimmed === original.name) {
+      cancelRename()
+      return
+    }
+    setIsRenaming(true)
+    try {
+      const response = await fetch(`${apiUrl}/api/datasets/${renamingId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      })
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}))
+        throw new Error(body.detail || 'Rename failed')
+      }
+      const next = datasets.map(d => (d.id === renamingId ? { ...d, name: trimmed } : d))
+      setDatasets(next)
+      if (selectedDataset?.id === renamingId) {
+        onSelectDataset({ ...selectedDataset, name: trimmed })
+      }
+      setSuccess('Dataset renamed')
+      setTimeout(() => setSuccess(null), 3000)
+      cancelRename()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Rename failed')
+    } finally {
+      setIsRenaming(false)
     }
   }
 
@@ -480,7 +549,46 @@ export function DatasetsView({
                 <CardHeader className="pb-2">
                   <div className="flex items-start justify-between gap-2">
                     <div className="flex-1 min-w-0">
-                      <CardTitle className="text-sm font-semibold truncate">{dataset.name}</CardTitle>
+                      {renamingId === dataset.id ? (
+                        <div
+                          className="flex items-center gap-1"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <Input
+                            autoFocus
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') commitRename()
+                              else if (e.key === 'Escape') cancelRename()
+                            }}
+                            disabled={isRenaming}
+                            className="h-7 text-sm"
+                          />
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-7 w-7 shrink-0"
+                            disabled={isRenaming}
+                            onClick={commitRename}
+                            aria-label="Save name"
+                          >
+                            {isRenaming ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-7 w-7 shrink-0"
+                            disabled={isRenaming}
+                            onClick={cancelRename}
+                            aria-label="Cancel rename"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </Button>
+                        </div>
+                      ) : (
+                        <CardTitle className="text-sm font-semibold truncate">{dataset.name}</CardTitle>
+                      )}
                       <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
                         <span className="inline-flex items-center px-2 py-0.5 bg-secondary rounded-md text-[10px] font-mono font-medium">
                           {getFormatLabel(dataset.format)}
@@ -533,8 +641,18 @@ export function DatasetsView({
                     <Button
                       size="sm"
                       variant="outline"
+                      className="h-7"
+                      onClick={(e) => { e.stopPropagation(); startRename(dataset) }}
+                      aria-label="Rename dataset"
+                    >
+                      <Pencil className="w-3 h-3" strokeWidth={1.75} />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
                       className="h-7 text-destructive hover:text-destructive hover:bg-destructive/10"
-                      onClick={(e) => { e.stopPropagation(); handleDelete(dataset.id) }}
+                      onClick={(e) => { e.stopPropagation(); setDatasetToDelete(dataset) }}
+                      aria-label="Delete dataset"
                     >
                       <Trash2 className="w-3 h-3" strokeWidth={1.75} />
                     </Button>
@@ -631,6 +749,36 @@ export function DatasetsView({
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Delete confirmation */}
+      <AlertDialog
+        open={datasetToDelete !== null}
+        onOpenChange={(open) => { if (!open) setDatasetToDelete(null) }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this dataset?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {datasetToDelete ? (
+                <>
+                  <span className="font-medium text-foreground">{datasetToDelete.name}</span> will be removed from
+                  OpenSAMAnnotator. For datasets loaded from a local folder the original source folder is left
+                  untouched; uploaded datasets are deleted from the workspace. This cannot be undone.
+                </>
+              ) : null}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleConfirmDelete}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

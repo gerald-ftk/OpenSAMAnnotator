@@ -546,6 +546,25 @@ async def get_dataset_stats(dataset_id: str, force_refresh: bool = False):
     }
 
 
+class DatasetRenameRequest(BaseModel):
+    name: str
+
+
+@app.patch("/api/datasets/{dataset_id}")
+async def rename_dataset(dataset_id: str, request: DatasetRenameRequest):
+    """Rename a loaded dataset. Updates the in-memory record and the manifest sidecar."""
+    if dataset_id not in active_datasets:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    new_name = request.name.strip()
+    if not new_name:
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+
+    active_datasets[dataset_id]["name"] = new_name
+    _save_dataset_metadata(dataset_id, active_datasets[dataset_id])
+    return {"success": True, "dataset": active_datasets[dataset_id]}
+
+
 @app.delete("/api/datasets/{dataset_id}")
 async def delete_dataset(dataset_id: str):
     """Delete a dataset.
