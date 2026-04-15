@@ -14,6 +14,7 @@ Commands
 """
 
 import os
+import re
 import sys
 import signal
 import subprocess
@@ -143,7 +144,13 @@ def is_alive(pid: int) -> bool:
 
 # ── Kill helpers ───────────────────────────────────────────────────────────────
 def kill_pid(pid: int, name: str = "process"):
-    """Gracefully terminate then force-kill if needed."""
+    """Gracefully terminate then force-kill if needed.
+
+    On Unix, kills the entire process group so shell-wrapped launches
+    (e.g. `sh -c 'npm run dev'`) take their grandchildren with them.
+    Both start_backend and start_frontend use start_new_session=True, so
+    *pid* is the session/pgrp leader.
+    """
     if not is_alive(pid):
         return
     info(f"Stopping {name} (PID {pid})…")
@@ -152,20 +159,37 @@ def kill_pid(pid: int, name: str = "process"):
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                            capture_output=True)
         else:
-            os.kill(pid, signal.SIGTERM)
-            # Give it 5 s to exit gracefully
+            try:
+                pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                return
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+            # Give the group up to 5 s to exit gracefully
             for _ in range(50):
                 time.sleep(0.1)
                 if not is_alive(pid):
                     break
             else:
-                os.kill(pid, signal.SIGKILL)
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
     except Exception as e:
         warn(f"Could not kill {name}: {e}")
 
 
 def kill_port(port: int):
-    """Kill whatever is listening on a port — catches orphaned processes."""
+    """Kill whatever is listening on *port* — catches orphaned processes.
+
+    On Linux, `lsof -ti:PORT` is unreliable for locating listeners (it can
+    return *client* PIDs with an established connection to that port while
+    missing the actual listener bound on the IPv6 wildcard). `fuser` is the
+    dedicated tool for this and gets it right. `ss` is used as a fallback
+    for systems without `fuser`.
+    """
     try:
         if IS_WIN:
             r = subprocess.run(
@@ -177,9 +201,39 @@ def kill_port(port: int):
                 if parts and parts[-1].isdigit():
                     subprocess.run(["taskkill", "/F", "/PID", parts[-1]],
                                    capture_output=True)
+            return
+
+        pids: set[int] = set()
+        if _has("fuser"):
+            r = subprocess.run(
+                ["fuser", f"{port}/tcp"],
+                capture_output=True, text=True,
+            )
+            for token in (r.stdout + " " + r.stderr).split():
+                if token.isdigit():
+                    pids.add(int(token))
         else:
-            subprocess.run(f"lsof -ti:{port} | xargs -r kill -9",
-                           shell=True, capture_output=True)
+            r = subprocess.run(
+                ["ss", "-tlnpH", f"sport = :{port}"],
+                capture_output=True, text=True,
+            )
+            for match in re.finditer(r"pid=(\d+)", r.stdout):
+                pids.add(int(match.group(1)))
+
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                continue
+        # Give them a moment, then SIGKILL any survivors
+        if pids:
+            time.sleep(0.5)
+            for pid in pids:
+                if is_alive(pid):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
     except Exception:
         pass
 
@@ -379,7 +433,10 @@ def start_frontend():
     sys.stdout.write(f"{B}[FRONT]{W} {separator}")
 
     pm = "pnpm" if _has("pnpm") else "npm"
-    cmd = f"{pm} run dev"
+    # Pin the dev server to port 3000. Without -p, Next.js silently shifts to
+    # 3001/3002 if 3000 is taken, which breaks the health check and opens the
+    # browser to the wrong (or stale) origin.
+    cmd = f"{pm} run dev -- -p 3000"
     kwargs = dict(cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
     if IS_WIN:
         proc = subprocess.Popen(cmd, **kwargs,
