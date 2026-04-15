@@ -1403,9 +1403,11 @@ async def start_model_download(
         try:
             _download_status[mname]["progress"] = 15
             model_manager.load_pretrained(mtype, mname, hf_token=token)
-            info = model_manager.loaded_models.get(mname, {})
-            if info.get("error") and not info.get("path"):
-                _download_status[mname] = {"status": "error", "progress": 0, "error": info["error"]}
+            # load_pretrained drops failed entries from loaded_models, so read
+            # the outcome from last_load_result instead of the live registry.
+            result = model_manager.last_load_result.get(mname, {})
+            if result.get("error") and not (result.get("has_model") or result.get("has_path")):
+                _download_status[mname] = {"status": "error", "progress": 0, "error": result["error"]}
             else:
                 _download_status[mname] = {"status": "done", "progress": 100}
         except Exception as e:
@@ -1419,6 +1421,21 @@ async def start_model_download(
 async def get_download_status(model_id: str):
     """Poll the progress of an ongoing model download."""
     return _download_status.get(model_id, {"status": "idle", "progress": 0})
+
+
+@app.post("/api/models/{model_id}/unload")
+async def unload_model(model_id: str):
+    """Drop a model from the in-memory registry (does not delete files on disk).
+
+    Needed so that a failed load (e.g. gated HF model without a token) can be
+    cleared and the user can retry — otherwise the ghost entry hides the
+    token input on the Models page.
+    """
+    found = model_manager.unload(model_id)
+    # Also clear any pending/error download status for this id so the UI
+    # doesn't flash a stale error badge on next fetch.
+    _download_status.pop(model_id, None)
+    return {"success": found}
 
 
 @app.post("/api/auto-annotate/{dataset_id}")

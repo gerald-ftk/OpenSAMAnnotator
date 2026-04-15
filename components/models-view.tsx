@@ -116,9 +116,14 @@ const PRETRAINED_CATALOG: Array<{
   { id: "sam21_small", name: "SAM 2.1 Small",     type: "sam2",  task: "segmentation",       sizeLabel: "46 MB"   },
   { id: "sam21_base",  name: "SAM 2.1 Base+",     type: "sam2",  task: "segmentation",       sizeLabel: "80 MB"   },
   { id: "sam21_large", name: "SAM 2.1 Large",     type: "sam2",  task: "segmentation",       sizeLabel: "224 MB"  },
-  // ── SAM 3 (gated on HuggingFace) ────────────────────────────────────────────
+  // ── SAM 3 / 3.1 (gated on HuggingFace) ──────────────────────────────────────
   { id: "sam3",        name: "SAM 3",             type: "sam3",  task: "segmentation",       sizeLabel: "~3.5 GB", requiresHfToken: true },
+  { id: "sam31",       name: "SAM 3.1",           type: "sam3",  task: "segmentation",       sizeLabel: "~3.5 GB", requiresHfToken: true },
 ]
+
+// Shared localStorage key for the HuggingFace token so both the Models and
+// Annotate views can reuse it when downloading gated checkpoints.
+const HF_TOKEN_KEY = "visos.hf_token"
 
 export function ModelsView({ apiUrl = "http://localhost:8000" }: ModelsViewProps) {
   const [models, setModels] = useState<BackendModel[]>([])
@@ -128,8 +133,21 @@ export function ModelsView({ apiUrl = "http://localhost:8000" }: ModelsViewProps
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set())
   const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({})
   const [error, setError] = useState<string | null>(null)
-  const [hfToken, setHfToken] = useState("")
+  // Hydrate the HF token from localStorage so users only have to paste it
+  // once, and so the Annotate view can reuse it for gated auto-downloads.
+  const [hfToken, setHfToken] = useState<string>(() => {
+    if (typeof window === "undefined") return ""
+    try { return window.localStorage.getItem(HF_TOKEN_KEY) ?? "" } catch { return "" }
+  })
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    try {
+      if (hfToken) window.localStorage.setItem(HF_TOKEN_KEY, hfToken)
+      else window.localStorage.removeItem(HF_TOKEN_KEY)
+    } catch {}
+  }, [hfToken])
 
   // -------------------------------------------------------------------------
   // Fetch models from backend on mount
@@ -178,11 +196,19 @@ export function ModelsView({ apiUrl = "http://localhost:8000" }: ModelsViewProps
     }
   }
 
-  // Backend has no unload endpoint — mark locally and refresh
-  // (The backend keeps models in memory; closing the process clears them.)
+  // Ask the backend to drop the model from its in-memory registry, then
+  // refetch. This also clears any stale "failed load" entry (e.g. a gated
+  // HF model attempted without a token) so the token input reappears.
   const handleUnloadModel = async (model: BackendModel) => {
-    // Optimistic local update — backend has no unload route
     setModels(prev => prev.map(m => m.id === model.id ? { ...m, loaded: false } : m))
+    try {
+      await fetch(`${apiUrl}/api/models/${encodeURIComponent(model.id)}/unload`, { method: "POST" })
+    } catch {
+      // Network hiccup — the optimistic update above still leaves the UI
+      // in a sensible state; the next fetchModels() will reconcile.
+    } finally {
+      await fetchModels()
+    }
   }
 
   // Backend has no delete endpoint for loaded models — remove from local list
@@ -297,16 +323,23 @@ export function ModelsView({ apiUrl = "http://localhost:8000" }: ModelsViewProps
     return <Cpu className="w-6 h-6" />
   }
 
-  // "Your Models" = anything loaded in memory OR downloaded to disk (pretrained or not)
-  const loadedModels = models.filter(m => m.loaded || (m as any).downloaded)
+  // "Your Models" = anything loaded in memory OR downloaded to disk (pretrained
+  // or not). Exclude entries whose only reason for being in the list is a
+  // previous failed-load error — they have no usable weights.
+  const loadedModels = models.filter(
+    m => !((m as any).error) && (m.loaded || (m as any).downloaded)
+  )
 
   const filteredLoaded = loadedModels.filter(m =>
     (m.name ?? "").toLowerCase().includes(searchQuery.toLowerCase())
   )
 
   // Which pretrained IDs are downloaded (on disk) or loaded in memory?
+  // Same exclusion: an entry carrying an error doesn't count as downloaded.
   const downloadedPretrainedIds = new Set(
-    models.filter(m => m.pretrained && (m.loaded || (m as any).downloaded)).map(m => m.id)
+    models
+      .filter(m => m.pretrained && !((m as any).error) && (m.loaded || (m as any).downloaded))
+      .map(m => m.id)
   )
 
   return (
@@ -483,10 +516,15 @@ export function ModelsView({ apiUrl = "http://localhost:8000" }: ModelsViewProps
               {PRETRAINED_CATALOG.map(preset => {
                 const isDownloading = downloadingIds.has(preset.id)
                 const isDownloaded = downloadedPretrainedIds.has(preset.id)
-                const isLoaded = models.some(m => m.id === preset.id && m.loaded)
+                const backendEntry = models.find(m => m.id === preset.id)
+                const isLoaded = !!backendEntry?.loaded
+                const hasError = !!(backendEntry as any)?.error
                 const progress = downloadProgress[preset.id] ?? 0
 
-                const needsToken = preset.requiresHfToken && !isDownloaded && !isLoaded
+                // Show the token input whenever a gated model isn't actually
+                // usable yet — i.e. not downloaded, not loaded, OR carrying a
+                // previous failed-load error from the backend.
+                const needsToken = preset.requiresHfToken && (!isDownloaded || hasError) && !isLoaded
 
                 return (
                   <div

@@ -25,6 +25,10 @@ class ModelManager:
         self.models_dir = Path(models_dir)
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.loaded_models: Dict[str, Dict[str, Any]] = {}
+        # Records the outcome of the most recent load_pretrained() call for a
+        # given model id so callers can surface failure reasons even when the
+        # failed entry is not kept in loaded_models.
+        self.last_load_result: Dict[str, Dict[str, Any]] = {}
     
     # Legacy Meta-format checkpoint stems — incompatible with ultralytics, hidden from UI
     _SAM_LEGACY_STEMS = {
@@ -82,6 +86,7 @@ class ModelManager:
         {"id": "sam21_base",  "name": "SAM 2.1 Base+", "type": "sam2",  "pretrained": True},
         {"id": "sam21_large", "name": "SAM 2.1 Large", "type": "sam2",  "pretrained": True},
         {"id": "sam3",        "name": "SAM 3",         "type": "sam3",  "pretrained": True},
+        {"id": "sam31",       "name": "SAM 3.1",       "type": "sam3",  "pretrained": True},
         # RF-DETR — Roboflow real-time detection transformer
         {"id": "rfdetr_base",  "name": "RF-DETR Base",  "type": "rfdetr", "pretrained": True},
         {"id": "rfdetr_large", "name": "RF-DETR Large", "type": "rfdetr", "pretrained": True},
@@ -116,15 +121,21 @@ class ModelManager:
         # 1. In-memory loaded models (highest priority)
         for model_id, info in self.loaded_models.items():
             seen_ids.add(model_id)
+            # "loaded" means an actual model object is resident in memory.
+            # "downloaded" means the weights are present on disk or the model
+            # is live in memory (ephemeral loads with no .pt file still count).
+            is_loaded = info.get("model") is not None
+            path_str = info.get("path")
+            path_on_disk = bool(path_str) and Path(path_str).exists()
             models.append({
                 "id": model_id,
                 "name": info.get("name") or model_id,
                 "type": info.get("type", "unknown"),
-                "loaded": True,
+                "loaded": is_loaded,
                 "pretrained": info.get("pretrained", False),
                 "classes": info.get("classes", []),
                 "error": info.get("error"),
-                "downloaded": True,
+                "downloaded": is_loaded or path_on_disk,
             })
 
         # 2. Files present on disk in workspace/models/
@@ -265,8 +276,31 @@ class ModelManager:
                 model_info = self._load_pretrained_groundingdino(model_name, model_info)
         except Exception as e:
             model_info["error"] = str(e)
-        self.loaded_models[model_id] = model_info
+
+        # Only keep the entry if the load actually produced a usable model or
+        # at least a file on disk. Otherwise, failed attempts (e.g. gated HF
+        # model with no token) would linger in loaded_models forever, making
+        # list_models() lie to the frontend about the model being available.
+        has_model = model_info.get("model") is not None
+        has_path  = bool(model_info.get("path")) and Path(model_info["path"]).exists() if model_info.get("path") else False
+        if has_model or has_path:
+            self.loaded_models[model_id] = model_info
+        else:
+            # Drop any previous stale entry so the frontend falls back to the
+            # catalog "not downloaded" state and re-shows the token input.
+            self.loaded_models.pop(model_id, None)
+        # Always record the outcome so background callers (e.g. the download
+        # endpoint) can read the error even when the entry was dropped.
+        self.last_load_result[model_id] = {
+            "error": model_info.get("error"),
+            "has_model": has_model,
+            "has_path": has_path,
+        }
         return model_id
+
+    def unload(self, model_id: str) -> bool:
+        """Remove a model from the in-memory registry. Returns True if found."""
+        return self.loaded_models.pop(model_id, None) is not None
     
     def _load_yolo_model(self, model_path: Path, model_info: Dict) -> Dict:
         """Load YOLO model"""
@@ -298,7 +332,9 @@ class ModelManager:
         "sam21_base":  ("sam2.1_b.pt",   "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam2.1_b.pt"),
         "sam21_large": ("sam2.1_l.pt",   "https://github.com/ultralytics/assets/releases/download/v8.3.0/sam2.1_l.pt"),
         # SAM 3
-        "sam3":        ("sam3.pt",       "https://huggingface.co/facebook/sam3/resolve/main/sam3.pt?download=true"),
+        "sam3":        ("sam3.pt",              "https://huggingface.co/facebook/sam3/resolve/main/sam3.pt?download=true"),
+        # SAM 3.1 — drop-in improvement over SAM 3, same gated HF repo workflow
+        "sam31":       ("sam3.1_multiplex.pt",  "https://huggingface.co/facebook/sam3.1/resolve/main/sam3.1_multiplex.pt?download=true"),
     }
 
     # Direct download URLs for pretrained YOLO/RT-DETR models
@@ -479,7 +515,8 @@ class ModelManager:
 
     # Models that require HuggingFace authentication
     _HF_GATED_MODELS = {
-        "sam3": ("facebook/sam3", "sam3.pt"),
+        "sam3":  ("facebook/sam3",   "sam3.pt"),
+        "sam31": ("facebook/sam3.1", "sam3.1_multiplex.pt"),
     }
 
     def _load_pretrained_sam(self, model_name: str, model_info: Dict, hf_token: Optional[str] = None) -> Dict:

@@ -326,6 +326,14 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
       const fd = new FormData()
       fd.append('model_type', model.type)
       fd.append('pretrained', model.id)
+      // Gated HuggingFace models (SAM 3 / SAM 3.1) need a token. Reuse the
+      // one the user pasted on the Models page — stored under visos.hf_token.
+      try {
+        const stored = typeof window !== 'undefined'
+          ? window.localStorage.getItem('visos.hf_token')
+          : null
+        if (stored) fd.append('hf_token', stored)
+      } catch {}
       const r = await fetch(`${apiUrl}/api/models/download`, { method: 'POST', body: fd })
       if (!r.ok) throw new Error('Failed to start download')
 
