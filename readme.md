@@ -1,6 +1,6 @@
 ![Hero Screenshot](assets/images/hero.png)
 
-# VisOS
+# OpenSAMAnnotator
 
 The all-in-one local workbench for computer vision datasets. Annotate, convert, augment, merge, and train — without touching a cloud service or writing a line of code.
 
@@ -14,7 +14,7 @@ The all-in-one local workbench for computer vision datasets. Annotate, convert, 
 
 Managing CV datasets is a grind. You download a COCO dataset, realise your framework expects YOLO, spend an hour writing a conversion script, discover half your classes are duplicates with different names, and write another script to fix it. Repeat forever.
 
-VisOS wraps all of that in a local UI. No accounts, no uploads, no bill.
+OpenSAMAnnotator wraps all of that in a local UI. No accounts, no uploads, no bill.
 
 ---
 
@@ -23,8 +23,8 @@ VisOS wraps all of that in a local UI. No accounts, no uploads, no bill.
 **Prerequisites:** Python 3.10+, Node.js 18+, npm or pnpm
 
 ```bash
-git clone https://github.com/Dan04ggg/VisOS.git
-cd VisOS
+git clone https://github.com/gerald-ftk/OpenSAMAnnotator.git
+cd OpenSAMAnnotator
 python3 run.py restart
 ```
 

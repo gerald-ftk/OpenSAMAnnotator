@@ -1,4 +1,4 @@
-# CV Dataset Manager Backend Requirements
+# OpenSAMAnnotator Backend Requirements
 
 # Core
 fastapi>=0.109.0

@@ -6,8 +6,8 @@ import { Toaster } from '@/components/ui/sonner'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'CV Dataset Manager',
-  description: 'Professional Computer Vision Dataset Management Suite - Annotate, Sort, Convert, Merge, and Train',
+  title: 'OpenSAMAnnotator',
+  description: 'OpenSAMAnnotator — local computer vision dataset workbench. Annotate, Sort, Convert, Merge, and Train.',
   keywords: ['computer vision', 'dataset', 'annotation', 'yolo', 'coco', 'machine learning', 'deep learning'],
 }
 

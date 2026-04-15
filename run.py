@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CV Dataset Manager - Process Manager
+OpenSAMAnnotator - Process Manager
 
 Commands
 --------
@@ -530,7 +530,7 @@ def cmd_stop(verbose=True):
 
 
 def cmd_start(open_browser_flag=True):
-    head("Starting CV Dataset Manager")
+    head("Starting OpenSAMAnnotator")
 
     # Fail fast if already running
     pids = read_pids()
@@ -718,7 +718,7 @@ def cmd_logs():
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 USAGE = f"""
-{BOLD}CV Dataset Manager — Process Manager{W}
+{BOLD}OpenSAMAnnotator — Process Manager{W}
 
   {C}python run.py{W}                  Start both servers (default)
   {C}python run.py start{W}            Start both servers
