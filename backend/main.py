@@ -63,42 +63,100 @@ clip_manager = CLIPEmbeddingManager()
 augmenter = DatasetAugmenter()
 
 METADATA_FILENAME = "dataset_metadata.json"
+MANIFESTS_DIR = DATASETS_DIR / ".manifests"
+
+
+def _manifest_path(dataset_id: str) -> Path:
+    return MANIFESTS_DIR / f"{dataset_id}.json"
 
 
 def _save_dataset_metadata(dataset_id: str, info: dict):
-    """Persist dataset info alongside the dataset files so it survives restarts."""
+    """Persist dataset info so it survives backend restarts.
+
+    Written to workspace/datasets/.manifests/<id>.json — NOT inside the
+    dataset directory. Local-folder datasets are symlinks into locations
+    the user owns (e.g. ~/Downloads/...), so writing a sidecar "inside"
+    the symlink would pollute their source folder.
+    """
     try:
-        meta_path = DATASETS_DIR / dataset_id / METADATA_FILENAME
-        meta_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(meta_path, "w") as f:
+        MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_manifest_path(dataset_id), "w") as f:
             json.dump(info, f, indent=2, default=str)
     except Exception as exc:
         logger.warning("Could not save metadata for dataset %s: %s", dataset_id, exc)
 
 
+def _delete_dataset_metadata(dataset_id: str):
+    """Remove the manifest sidecar, if present."""
+    try:
+        _manifest_path(dataset_id).unlink(missing_ok=True)
+    except Exception as exc:
+        logger.warning("Could not delete manifest for dataset %s: %s", dataset_id, exc)
+
+
 def _restore_datasets():
     """
-    On startup: scan workspace/datasets/ for any folder that has a
-    dataset_metadata.json sidecar and re-register it in active_datasets.
-    Folders without metadata are re-parsed from scratch.
+    On startup: re-register datasets from two sources:
+
+    1) Manifest files under workspace/datasets/.manifests/ — the modern
+       location, safe for local-folder datasets that are symlinks.
+    2) Legacy in-folder dataset_metadata.json sidecars, for backwards
+       compatibility with datasets created before the manifest move.
+
+    Orphaned manifests (no backing directory/symlink) are pruned.
     """
     if not DATASETS_DIR.exists():
         return
     restored = 0
-    for entry in DATASETS_DIR.iterdir():
-        if not entry.is_dir():
-            continue
-        dataset_id = entry.name
-        meta_path = entry / METADATA_FILENAME
-        try:
-            if meta_path.exists():
-                with open(meta_path) as f:
+
+    # 1. Manifest-backed datasets
+    if MANIFESTS_DIR.exists():
+        for manifest in MANIFESTS_DIR.glob("*.json"):
+            dataset_id = manifest.stem
+            entry = DATASETS_DIR / dataset_id
+            if not entry.exists() and not entry.is_symlink():
+                # Backing path is gone — prune the orphaned manifest.
+                try:
+                    manifest.unlink()
+                except Exception:
+                    pass
+                continue
+            try:
+                with open(manifest) as f:
                     info = json.load(f)
                 info["id"] = dataset_id
                 active_datasets[dataset_id] = info
                 restored += 1
+            except Exception as exc:
+                logger.warning("[startup] Skipping dataset %s — bad manifest: %s", dataset_id, exc)
+
+    # 2. Legacy sidecar and unknown-directory discovery
+    for entry in DATASETS_DIR.iterdir():
+        if entry.name.startswith("."):
+            continue
+        # Skip symlinks whose targets are missing — nothing to restore.
+        if not entry.exists():
+            continue
+        if not (entry.is_dir() or entry.is_symlink()):
+            continue
+        dataset_id = entry.name
+        if dataset_id in active_datasets:
+            continue
+        # Legacy sidecar is trusted ONLY for real directories inside our
+        # workspace. For symlinks the "sidecar" would live inside the user's
+        # source folder, which we must not read as authoritative metadata
+        # (it may be stale pollution from older versions of this code).
+        legacy_meta = entry / METADATA_FILENAME
+        use_legacy = (not entry.is_symlink()) and legacy_meta.exists()
+        try:
+            if use_legacy:
+                with open(legacy_meta) as f:
+                    info = json.load(f)
+                info["id"] = dataset_id
+                active_datasets[dataset_id] = info
+                _save_dataset_metadata(dataset_id, info)
+                restored += 1
             else:
-                # No sidecar — try to parse and create one
                 info = dataset_parser.parse_dataset(entry, name=entry.name)
                 info["id"] = dataset_id
                 active_datasets[dataset_id] = info
@@ -106,6 +164,7 @@ def _restore_datasets():
                 restored += 1
         except Exception as exc:
             logger.warning("[startup] Skipping dataset %s — could not load: %s", dataset_id, exc)
+
     if restored:
         print(f"[startup] Restored {restored} dataset(s) from workspace.")
 
@@ -569,14 +628,30 @@ async def get_dataset_stats(dataset_id: str, force_refresh: bool = False):
 
 @app.delete("/api/datasets/{dataset_id}")
 async def delete_dataset(dataset_id: str):
-    """Delete a dataset"""
+    """Delete a dataset.
+
+    Symlinks (local-folder datasets) are unlinked — we never follow them,
+    so the user's original source folder is untouched. Real directories
+    (uploaded datasets) are recursively removed. The manifest sidecar is
+    always deleted so the dataset doesn't "reappear" on the next startup.
+    """
     if dataset_id not in active_datasets:
         raise HTTPException(status_code=404, detail="Dataset not found")
-    
+
     dataset_path = DATASETS_DIR / dataset_id
-    shutil.rmtree(dataset_path, ignore_errors=True)
+    try:
+        # Check is_symlink BEFORE exists — a symlink with a missing target
+        # reports exists()==False but still needs to be unlinked.
+        if dataset_path.is_symlink():
+            dataset_path.unlink()
+        elif dataset_path.exists():
+            shutil.rmtree(dataset_path, ignore_errors=True)
+    except Exception as exc:
+        logger.warning("Could not remove dataset path %s: %s", dataset_path, exc)
+
+    _delete_dataset_metadata(dataset_id)
     del active_datasets[dataset_id]
-    
+
     return {"success": True}
 
 
