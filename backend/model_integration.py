@@ -580,12 +580,19 @@ class ModelManager:
                 dtype=np.int64,
             )
 
+            # With a single point we want the 3-mask ambiguity output so we
+            # can pick the most confident one. With multiple points the user
+            # is refining a single object, so SAM should return one refined
+            # mask — multimask_output=True returns partial/ambiguous masks
+            # that often threshold below 0.5 everywhere, producing the
+            # "no mask for those points" failure.
+            use_multimask = len(prompt_points) == 1
             try:
                 masks, scores, _logits = model.predict_inst(
                     state,
                     point_coords=pts_px,
                     point_labels=labels,
-                    multimask_output=True,
+                    multimask_output=use_multimask,
                 )
             except Exception as exc:
                 print(f"[sam3_point] predict_inst failed: {exc}")
@@ -594,12 +601,14 @@ class ModelManager:
             masks_np = _to_numpy(masks)
             scores_np = _to_numpy(scores)
             if masks_np is None or masks_np.size == 0:
+                print("[sam3_point] predict_inst returned no masks")
                 return annotations
 
             if masks_np.ndim == 2:
                 masks_np = masks_np[None, ...]
 
-            # Pick the single best-scored mask
+            # Pick the single best-scored mask (degenerate to index 0 when
+            # use_multimask is False and only one mask came back).
             if scores_np is not None and scores_np.size > 0:
                 best = int(scores_np.argmax())
                 best_score = float(scores_np.flatten()[best])
@@ -611,8 +620,14 @@ class ModelManager:
                 best = 0
 
             binary = (masks_np[best] > 0.5).astype("uint8")
-            if binary.sum() > 0:
-                annotations.extend(_binary_to_polygons(binary, best_score))
+            if binary.sum() == 0:
+                print(
+                    f"[sam3_point] empty mask after threshold "
+                    f"(points={len(prompt_points)}, multimask={use_multimask}, "
+                    f"score={best_score:.3f})"
+                )
+                return annotations
+            annotations.extend(_binary_to_polygons(binary, best_score))
             return annotations
 
         # ── No prompt: not supported for SAM 3 image model ──────────────
