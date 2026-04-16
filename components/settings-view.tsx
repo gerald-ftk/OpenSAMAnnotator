@@ -24,7 +24,12 @@ import {
   Folder,
   ChevronRight,
   HardDrive,
+  KeyRound,
+  Eye,
+  EyeOff,
 } from "lucide-react"
+
+const HF_TOKEN_KEY = "opensamannotator.hf_token"
 import { useSettings } from "@/lib/settings-context"
 
 interface FolderItem {
@@ -161,6 +166,26 @@ export function SettingsView() {
   const [stopping, setStopping] = useState(false)
   const [hwInfo, setHwInfo] = useState<HardwareInfo | null>(null)
   const [hwLoading, setHwLoading] = useState(false)
+  // HuggingFace token is stored in localStorage so it survives reloads
+  // and is sent along with SAM download requests. The backend also falls
+  // back to the HF_TOKEN env var if no explicit token is provided.
+  const [hfToken, setHfToken] = useState("")
+  const [showHfToken, setShowHfToken] = useState(false)
+  const [hfSaved, setHfSaved] = useState(false)
+
+  useEffect(() => {
+    try { setHfToken(localStorage.getItem(HF_TOKEN_KEY) || "") } catch {}
+  }, [])
+
+  const saveHfToken = () => {
+    try {
+      const trimmed = hfToken.trim()
+      if (trimmed) localStorage.setItem(HF_TOKEN_KEY, trimmed)
+      else localStorage.removeItem(HF_TOKEN_KEY)
+      setHfSaved(true)
+      setTimeout(() => setHfSaved(false), 2000)
+    } catch {}
+  }
 
   const fetchHardware = async () => {
     setHwLoading(true)
@@ -575,6 +600,77 @@ export function SettingsView() {
 
             <p className="text-xs text-muted-foreground">
               GPU setting is applied to new training jobs and auto-annotation runs after saving.
+            </p>
+          </CardContent>
+        </Card>
+
+        {/* ── HuggingFace Access ────────────────────────────────── */}
+        <Card className="border-border/50 bg-card/50 backdrop-blur">
+          <CardHeader>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <KeyRound className="w-5 h-5 text-primary" />
+              HuggingFace Access
+            </CardTitle>
+            <CardDescription>
+              SAM checkpoints live in gated HuggingFace repos. Paste your access token once and it's reused for every download.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Access Token</label>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Input
+                    type={showHfToken ? "text" : "password"}
+                    value={hfToken}
+                    onChange={e => setHfToken(e.target.value)}
+                    placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                    className="pr-9 font-mono text-xs"
+                    autoComplete="off"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowHfToken(v => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    title={showHfToken ? "Hide token" : "Show token"}
+                  >
+                    {showHfToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <Button variant="outline" onClick={saveHfToken}>
+                  {hfSaved ? <><CheckCircle2 className="w-4 h-4 text-green-400" /> Saved</> : "Save"}
+                </Button>
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Get a token at{" "}
+              <a
+                href="https://huggingface.co/settings/tokens"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-primary"
+              >
+                hf.co/settings/tokens
+              </a>
+              . First request access to{" "}
+              <a
+                href="https://huggingface.co/facebook/sam3"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-primary"
+              >
+                facebook/sam3
+              </a>{" "}
+              and{" "}
+              <a
+                href="https://huggingface.co/facebook/sam3.1"
+                target="_blank"
+                rel="noreferrer"
+                className="underline hover:text-primary"
+              >
+                facebook/sam3.1
+              </a>
+              . If the <code className="bg-muted px-1 py-0.5 rounded">HF_TOKEN</code> env var is set, the backend uses it as a fallback.
             </p>
           </CardContent>
         </Card>

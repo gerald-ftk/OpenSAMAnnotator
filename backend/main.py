@@ -257,7 +257,43 @@ async def lifespan(app: FastAPI):
     _probe_gpu()
     _restore_datasets()
     _restore_jobs()
+    _bootstrap_sam_download()
     yield
+
+
+def _bootstrap_sam_download():
+    """Kick off a background SAM download on startup if HF_TOKEN is set.
+
+    The user's app is gated behind a fully-downloaded SAM (both sam3 +
+    sam31) so auto-annotation can't silently fall back to a half-install
+    and produce garbage. If the env var is present we start the download
+    immediately; otherwise the frontend gate will prompt for a token and
+    POST it to /api/models/download.
+    """
+    if model_manager.is_fully_downloaded():
+        return
+    env_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+    if not env_token:
+        print("[startup] SAM not downloaded; waiting for HF token from the UI.", flush=True)
+        return
+    if _download_status.get("sam", {}).get("status") == "downloading":
+        return
+    print("[startup] HF_TOKEN found — auto-downloading SAM in the background.", flush=True)
+    _download_status["sam"] = {"status": "downloading", "progress": 5}
+
+    def _do():
+        try:
+            _download_status["sam"]["progress"] = 15
+            model_manager.load_pretrained("sam3", "sam", hf_token=env_token)
+            result = model_manager.last_load_result.get("sam", {})
+            if result.get("error") and not model_manager.is_fully_downloaded():
+                _download_status["sam"] = {"status": "error", "progress": 0, "error": result["error"]}
+            else:
+                _download_status["sam"] = {"status": "done", "progress": 100}
+        except Exception as exc:
+            _download_status["sam"] = {"status": "error", "progress": 0, "error": str(exc)}
+
+    threading.Thread(target=_do, daemon=True).start()
 
 
 app = FastAPI(
@@ -1302,6 +1338,11 @@ async def get_dataset_images(
         # user's manual bboxes / SAM masks actually show up.
         if dataset["format"] == "generic-images":
             _merge_generic_annotations(dataset_id, dataset_path, all_images)
+        # Merge the "No Objects" review sidecar so the UI can distinguish
+        # negative samples from unreviewed images.
+        empty_set = annotation_manager.get_empty_images(dataset_path, dataset_id)
+        for img in all_images:
+            img["reviewed_empty"] = img.get("id") in empty_set
         _images_cache[dataset_id] = all_images
     else:
         all_images = _images_cache[dataset_id]
@@ -1348,7 +1389,22 @@ async def get_image_with_annotations(dataset_id: str, image_id: str):
         if anns:
             image_data["annotations"] = anns
             image_data["has_annotations"] = True
+    if image_data:
+        empty_set = annotation_manager.get_empty_images(dataset_path, dataset_id)
+        image_data["reviewed_empty"] = image_id in empty_set
     return image_data
+
+
+@app.put("/api/datasets/{dataset_id}/image/{image_id}/review-empty")
+async def set_review_empty(dataset_id: str, image_id: str, empty: bool = True):
+    """Mark or unmark an image as reviewed with no objects (negative sample)."""
+    if dataset_id not in active_datasets:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    dataset_path = DATASETS_DIR / dataset_id
+    annotation_manager.set_empty_image(dataset_path, dataset_id, image_id, empty)
+    # Bust the image list cache so the new flag propagates on next fetch.
+    _images_cache.pop(dataset_id, None)
+    return {"success": True, "image_id": image_id, "reviewed_empty": empty}
 
 
 @app.put("/api/datasets/{dataset_id}/image/{image_id}/annotations")
@@ -1459,11 +1515,15 @@ async def load_model(
 @app.post("/api/models/download")
 async def start_model_download(
     background_tasks: BackgroundTasks,
-    model_type: str = Form(...),
+    model_type: str = Form("sam3"),
     pretrained: str = Form(...),
     hf_token: Optional[str] = Form(None),
 ):
-    """Start a background download for a pretrained model."""
+    """Start a background download for the SAM model.
+
+    Accepts ``pretrained="sam"`` (the unified UI id) and downloads both
+    backing checkpoints. Legacy ``sam3`` / ``sam31`` values still work.
+    """
     if _download_status.get(pretrained, {}).get("status") == "downloading":
         return {"success": True, "already_started": True}
 
@@ -1473,8 +1533,6 @@ async def start_model_download(
         try:
             _download_status[mname]["progress"] = 15
             model_manager.load_pretrained(mtype, mname, hf_token=token)
-            # load_pretrained drops failed entries from loaded_models, so read
-            # the outcome from last_load_result instead of the live registry.
             result = model_manager.last_load_result.get(mname, {})
             if result.get("error") and not (result.get("has_model") or result.get("has_path")):
                 _download_status[mname] = {"status": "error", "progress": 0, "error": result["error"]}
@@ -1491,6 +1549,26 @@ async def start_model_download(
 async def get_download_status(model_id: str):
     """Poll the progress of an ongoing model download."""
     return _download_status.get(model_id, {"status": "idle", "progress": 0})
+
+
+@app.get("/api/models/sam-status")
+async def get_sam_status():
+    """Unified SAM readiness snapshot for the startup gate.
+
+    Returns everything the frontend needs to decide whether to show the
+    gate, run the auto-download (env_token_present), prompt for a token,
+    or let the user dismiss and continue without SAM.
+    """
+    dl = _download_status.get("sam", {"status": "idle", "progress": 0})
+    return {
+        "ready": model_manager.is_fully_downloaded(),
+        "downloading": dl.get("status") == "downloading",
+        "progress": dl.get("progress", 0),
+        "error": dl.get("error"),
+        "env_token_present": bool(
+            os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+        ),
+    }
 
 
 @app.post("/api/models/{model_id}/unload")
@@ -2348,6 +2426,7 @@ def _stage_generic_as_yolo(
     labels_dir.mkdir(parents=True, exist_ok=True)
 
     sidecar = _load_generic_sidecar(dataset_id, dataset_path)
+    empty_set = annotation_manager.get_empty_images(dataset_path, dataset_id)
     classes: List[str] = list(dataset.get("classes") or [])
     class_to_id: Dict[str, int] = {name: idx for idx, name in enumerate(classes)}
 
@@ -2367,7 +2446,13 @@ def _stage_generic_as_yolo(
             continue
 
         anns = sidecar.get(stable_id) or []
+        # Reviewed-empty images get a 0-byte label file so downstream YOLO
+        # trainers use them as hard negatives. Images that are neither
+        # annotated nor reviewed are skipped.
+        is_empty_reviewed = stable_id in empty_set
         if not anns:
+            if is_empty_reviewed:
+                (labels_dir / f"{stable_id}.txt").write_text("")
             continue
 
         try:

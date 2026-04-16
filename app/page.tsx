@@ -10,7 +10,6 @@ import { SortingView } from '@/components/sorting-view'
 import { AnnotationView } from '@/components/annotation-view'
 import { ConvertView } from '@/components/convert-view'
 import { MergeView } from '@/components/merge-view'
-import { ModelsView } from '@/components/models-view'
 import { SettingsView } from '@/components/settings-view'
 import { ClassManagementView } from '@/components/class-management-view'
 import { AugmentationView } from '@/components/augmentation-view'
@@ -22,9 +21,12 @@ import { SnapshotView } from '@/components/snapshot-view'
 import { YamlWizardView } from '@/components/yaml-wizard-view'
 import { DuplicateDetectionView } from '@/components/duplicate-detection-view'
 import { BatchJobsView } from '@/components/batch-jobs-view'
+import { SamGate } from '@/components/sam-gate'
 import { useSettings } from '@/lib/settings-context'
 
-export type ViewType = 'datasets' | 'dashboard' | 'gallery' | 'sorting' | 'annotate' | 'classes' | 'augmentation' | 'video-extraction' | 'split' | 'convert' | 'merge' | 'models' | 'batch-jobs' | 'health' | 'compare' | 'snapshots' | 'yaml-wizard' | 'settings' | 'duplicate-detection'
+const SAM_GATE_DISMISSED_KEY = 'opensamannotator.sam_gate_dismissed'
+
+export type ViewType = 'datasets' | 'dashboard' | 'gallery' | 'sorting' | 'annotate' | 'classes' | 'augmentation' | 'video-extraction' | 'split' | 'convert' | 'merge' | 'batch-jobs' | 'health' | 'compare' | 'snapshots' | 'yaml-wizard' | 'settings' | 'duplicate-detection'
 
 export interface Dataset {
   id: string
@@ -48,6 +50,10 @@ export interface ImageData {
   class_name?: string
   annotations: Annotation[]
   has_annotations: boolean
+  // User has reviewed this image and confirmed it contains no instances of
+  // the classes being annotated. Distinct from "never looked at" — drives
+  // empty label files on export (YOLO) and a distinct filter in the gallery.
+  reviewed_empty?: boolean
 }
 
 export interface Annotation {
@@ -71,7 +77,7 @@ export type ImageCache = Record<string, ImageData[]>
 const VALID_VIEWS = new Set<ViewType>([
   'datasets', 'dashboard', 'gallery', 'sorting', 'annotate', 'classes',
   'augmentation', 'video-extraction', 'split', 'convert', 'merge',
-  'models', 'batch-jobs', 'health', 'compare', 'snapshots',
+  'batch-jobs', 'health', 'compare', 'snapshots',
   'yaml-wizard', 'settings', 'duplicate-detection',
 ])
 
@@ -183,6 +189,21 @@ export default function Home() {
   // apiUrl now comes from the shared settings context
   const { settings } = useSettings()
   const apiUrl = settings.apiUrl
+
+  // ── SAM gate ──────────────────────────────────────────────────────────
+  // Block the rest of the UI until SAM is fully downloaded OR the user
+  // chooses "use without SAM". The dismissal is sticky across view
+  // changes (sessionStorage) but not across reloads — on a fresh start
+  // we re-check so the user sees their new state.
+  const [samReady, setSamReady] = useState(false)
+  const [gateDismissed, setGateDismissed] = useState(false)
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem(SAM_GATE_DISMISSED_KEY) === '1') {
+        setGateDismissed(true)
+      }
+    } catch {}
+  }, [])
 
   // Poll GPU/CUDA install status every 4 s — hide banner once state is "ready"
   useEffect(() => {
@@ -377,13 +398,6 @@ export default function Home() {
           />
         )
         break
-      case 'models':
-        viewNode = (
-          <ModelsView
-            apiUrl={apiUrl}
-          />
-        )
-        break
       case 'batch-jobs':
         viewNode = (
           <BatchJobsView
@@ -422,8 +436,21 @@ export default function Home() {
     return viewNode
   }
 
+  // Show the SAM gate until the checkpoints are ready OR the user skips.
+  const showGate = !samReady && !gateDismissed
+
   return (
     <div className="flex h-screen bg-background flex-col overflow-hidden">
+      {showGate && (
+        <SamGate
+          apiUrl={apiUrl}
+          onReady={() => setSamReady(true)}
+          onDismiss={() => {
+            try { sessionStorage.setItem(SAM_GATE_DISMISSED_KEY, '1') } catch {}
+            setGateDismissed(true)
+          }}
+        />
+      )}
       {/* GPU status banner */}
       {gpuStatus && (
         <div className={`flex items-center gap-2.5 px-4 py-2 text-xs font-medium z-50 shrink-0 ${

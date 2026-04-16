@@ -15,8 +15,61 @@ import shutil
 
 class AnnotationManager:
     """Manage annotations for datasets"""
-    
+
     IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tiff", ".tif"}
+
+    # ── Review sidecar (No Objects / negative samples) ──────────────────────
+    #
+    # Tracks which images the user has *reviewed* and confirmed contain no
+    # instances of the classes being annotated. This is distinct from "not
+    # yet reviewed": both have zero annotations, but negative samples should
+    # produce empty label files on export (YOLO) so downstream trainers use
+    # them as hard negatives. The sidecar is kept separate from the
+    # per-format annotation files so the round-trip works for every format,
+    # and so the user's native YOLO/COCO label files stay clean.
+    #
+    # Shape: {"empty_images": ["imgid1", "imgid2", ...]}
+    # Lives at workspace/datasets/.manifests/<dataset_id>.review.json
+
+    def _review_sidecar_path(self, dataset_path: Path, dataset_id: Optional[str]) -> Path:
+        if dataset_id:
+            manifests_dir = Path(dataset_path).parent / ".manifests"
+            manifests_dir.mkdir(parents=True, exist_ok=True)
+            return manifests_dir / f"{dataset_id}.review.json"
+        return Path(dataset_path) / ".opensamannotator_review.json"
+
+    def get_empty_images(self, dataset_path: Path, dataset_id: Optional[str]) -> set:
+        """Return the set of image IDs marked as 'No Objects' (reviewed empty)."""
+        sidecar = self._review_sidecar_path(dataset_path, dataset_id)
+        if not sidecar.exists():
+            return set()
+        try:
+            with open(sidecar) as f:
+                data = json.load(f) or {}
+            return set(data.get("empty_images", []))
+        except Exception:
+            return set()
+
+    def set_empty_image(
+        self,
+        dataset_path: Path,
+        dataset_id: Optional[str],
+        image_id: str,
+        empty: bool,
+    ) -> set:
+        """Toggle the 'No Objects' flag for a single image. Returns the new set."""
+        sidecar = self._review_sidecar_path(dataset_path, dataset_id)
+        current = self.get_empty_images(dataset_path, dataset_id)
+        if empty:
+            current.add(image_id)
+        else:
+            current.discard(image_id)
+        try:
+            with open(sidecar, "w") as f:
+                json.dump({"empty_images": sorted(current)}, f, indent=2)
+        except Exception as exc:
+            print(f"[review] Could not write review sidecar {sidecar}: {exc}")
+        return current
     
     def update_annotations(
         self,

@@ -17,7 +17,6 @@ import {
   ArrowLeftRight,
   GitMerge,
   FileCode,
-  Bot,
   List,
   Activity,
   BarChart2,
@@ -95,12 +94,6 @@ const navGroups: NavGroup[] = [
         label: 'Classes',
         icon: Tag,
         description: 'Define the object categories to annotate (e.g. "car", "person").',
-      },
-      {
-        id: 'models',
-        label: 'Models',
-        icon: Bot,
-        description: 'Download and manage SAM 3 / SAM 3.1 weights from HuggingFace.',
       },
       {
         id: 'batch-jobs',

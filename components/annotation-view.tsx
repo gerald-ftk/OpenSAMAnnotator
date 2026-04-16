@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Slider } from '@/components/ui/slider'
 import { Input } from '@/components/ui/input'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import {
   MousePointer2, Square, Pentagon, Wand2, Save, Trash2,
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut, RotateCcw,
@@ -19,6 +20,162 @@ import { toast } from 'sonner'
 
 const PAGE_SIZE = 50
 const PRELOAD_AHEAD = 3
+
+/**
+ * Rasterize a brush stroke onto an offscreen canvas and trace its outline.
+ *
+ * The previous brush implementation turned the list of cursor waypoints
+ * directly into a polygon, which outlined the *cursor path*, not the
+ * painted area — a thin squiggle instead of the thick brush stroke the
+ * user actually sees. This uses the same canvas drawing primitives as the
+ * live preview (round line caps/joins) so the traced outline matches the
+ * feedback exactly, then uses Moore-neighborhood boundary tracing to
+ * extract a polygon at pixel resolution, and finally simplifies the
+ * contour with Douglas-Peucker so the saved annotation has a sensible
+ * point count.
+ *
+ * Returns a flat pixel-space [x0,y0,x1,y1,...] list in source-image
+ * coordinates. Caller is responsible for normalizing.
+ */
+function tracePaintedBoundary(
+  strokePts: { x: number; y: number }[],
+  radiusPx: number,
+  imgW: number,
+  imgH: number,
+): number[] {
+  if (strokePts.length === 0) return []
+
+  // Work at downsampled resolution for speed. High-res images make the
+  // boundary trace dominate the interaction latency; 1024 on the long
+  // axis is plenty of detail for annotation-quality polygons.
+  const MAX_SIDE = 1024
+  const downscale = Math.min(1, MAX_SIDE / Math.max(imgW, imgH))
+  const w = Math.max(1, Math.round(imgW * downscale))
+  const h = Math.max(1, Math.round(imgH * downscale))
+  const r = Math.max(1, radiusPx * downscale)
+
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return []
+
+  ctx.fillStyle = 'white'
+  ctx.strokeStyle = 'white'
+  ctx.lineWidth = r * 2
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+
+  if (strokePts.length === 1) {
+    ctx.beginPath()
+    ctx.arc(strokePts[0].x * downscale, strokePts[0].y * downscale, r, 0, Math.PI * 2)
+    ctx.fill()
+  } else {
+    ctx.beginPath()
+    ctx.moveTo(strokePts[0].x * downscale, strokePts[0].y * downscale)
+    for (let i = 1; i < strokePts.length; i++) {
+      ctx.lineTo(strokePts[i].x * downscale, strokePts[i].y * downscale)
+    }
+    ctx.stroke()
+  }
+
+  // Binary mask from the alpha channel.
+  const data = ctx.getImageData(0, 0, w, h).data
+  const mask = new Uint8Array(w * h)
+  for (let i = 0; i < mask.length; i++) mask[i] = data[i * 4 + 3] > 0 ? 1 : 0
+
+  // Moore-neighborhood boundary trace, starting at the top-left-most
+  // painted pixel. Only the outer contour of the first-found blob is
+  // returned — small isolated dots from fast cursor moves get swallowed,
+  // which is fine for freehand brush strokes.
+  let sx = -1, sy = -1
+  outer: for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (mask[y * w + x]) { sx = x; sy = y; break outer }
+    }
+  }
+  if (sx === -1) return []
+
+  const dx = [1, 1, 0, -1, -1, -1, 0, 1]
+  const dy = [0, 1, 1, 1, 0, -1, -1, -1]
+  const contour: number[][] = [[sx, sy]]
+  let cx = sx, cy = sy
+  let backtrack = 4  // came from the west, start looking clockwise from NW
+  const maxSteps = w * h
+  for (let step = 0; step < maxSteps; step++) {
+    let found = false
+    const startDir = (backtrack + 1) & 7
+    for (let i = 0; i < 8; i++) {
+      const dir = (startDir + i) & 7
+      const nx = cx + dx[dir]
+      const ny = cy + dy[dir]
+      if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue
+      if (mask[ny * w + nx]) {
+        backtrack = (dir + 4) & 7
+        cx = nx; cy = ny
+        contour.push([cx, cy])
+        found = true
+        break
+      }
+    }
+    if (!found) break
+    if (cx === sx && cy === sy && contour.length > 2) break
+  }
+
+  if (contour.length < 3) return []
+
+  // Douglas-Peucker simplification keeps the polygon at a manageable size.
+  const epsilon = Math.max(1, r * 0.35)
+  const simplified = douglasPeucker(contour, epsilon)
+
+  // Rescale back to source-image coordinates.
+  const flat: number[] = []
+  for (const [x, y] of simplified) {
+    flat.push(x / downscale, y / downscale)
+  }
+  return flat
+}
+
+function douglasPeucker(pts: number[][], epsilon: number): number[][] {
+  if (pts.length < 3) return pts
+  const sqEps = epsilon * epsilon
+  const keep = new Uint8Array(pts.length)
+  keep[0] = 1
+  keep[pts.length - 1] = 1
+  const stack: [number, number][] = [[0, pts.length - 1]]
+  while (stack.length) {
+    const [lo, hi] = stack.pop()!
+    if (hi - lo < 2) continue
+    const [ax, ay] = pts[lo]
+    const [bx, by] = pts[hi]
+    const ddx = bx - ax, ddy = by - ay
+    const lenSq = ddx * ddx + ddy * ddy
+    let maxDist = -1, maxIdx = -1
+    for (let i = lo + 1; i < hi; i++) {
+      const [px, py] = pts[i]
+      let dist: number
+      if (lenSq === 0) {
+        const dxp = px - ax, dyp = py - ay
+        dist = dxp * dxp + dyp * dyp
+      } else {
+        const t = ((px - ax) * ddx + (py - ay) * ddy) / lenSq
+        const clamped = Math.max(0, Math.min(1, t))
+        const qx = ax + clamped * ddx, qy = ay + clamped * ddy
+        const dxp = px - qx, dyp = py - qy
+        dist = dxp * dxp + dyp * dyp
+      }
+      if (dist > maxDist) { maxDist = dist; maxIdx = i }
+    }
+    if (maxDist > sqEps && maxIdx > 0) {
+      keep[maxIdx] = 1
+      stack.push([lo, maxIdx])
+      stack.push([maxIdx, hi])
+    }
+  }
+  const out: number[][] = []
+  for (let i = 0; i < pts.length; i++) if (keep[i]) out.push(pts[i])
+  return out
+}
 
 interface BatchJobState {
   job_id: string
@@ -112,14 +269,27 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
   const [showShortcutHint, setShowShortcutHint] = useState(false)
 
   // Auto-annotate state
-  const [models, setModels] = useState<{ id: string; name: string; type: string; downloaded: boolean; loaded: boolean }[]>([])
+  const [models, setModels] = useState<{
+    id: string
+    name: string
+    type: string
+    downloaded: boolean
+    loaded: boolean
+    // Per-checkpoint state from the backend's unified SAM entry. Point
+    // prompts specifically need `backing.sam3.downloaded` — sam31 alone
+    // can't drive interactive point segmentation (its tracker weights are
+    // video-multiplex-specific and initialise randomly into the
+    // inst_interactive_predictor).
+    backing?: { sam3: { downloaded: boolean; loaded: boolean }; sam31: { downloaded: boolean; loaded: boolean } }
+    fully_downloaded?: boolean
+  }[]>([])
   const [selectedModel, setSelectedModel] = useState('')
   const [confidence, setConfidence] = useState(0.5)
   const [isAutoAnnotating, setIsAutoAnnotating] = useState(false)
   const [downloadingModelId, setDownloadingModelId] = useState<string | null>(null)
-  // SAM3 text prompt — tag-chip model
-  const [promptTags, setPromptTags] = useState<string[]>([])
-  const [promptInput, setPromptInput] = useState('')
+  // Auto-Annotate dialog — single text prompt (SAM 3.1 only accepts one)
+  const [showAutoAnnotateDialog, setShowAutoAnnotateDialog] = useState(false)
+  const [autoAnnotatePromptInput, setAutoAnnotatePromptInput] = useState('')
   // Batch job tracking: job_id → BatchJobState
   const [batchJobs, setBatchJobs] = useState<Record<string, BatchJobState>>({})
   const [isStartingBatch, setIsStartingBatch] = useState(false)
@@ -335,13 +505,20 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
       const r = await fetch(`${apiUrl}/api/models`)
       if (r.ok) {
         const d = await r.json()
-        setModels((d.models || []).map((m: any) => ({
+        const list = (d.models || []).map((m: any) => ({
           id: m.id,
           name: m.name,
           type: m.type || 'unknown',
           downloaded: !!(m.downloaded || m.loaded),
           loaded: !!m.loaded,
-        })))
+          backing: m.backing,
+          fully_downloaded: m.fully_downloaded,
+        }))
+        setModels(list)
+        // Auto-select the unified SAM entry so the wand / auto-annotate
+        // work without requiring the user to click anywhere first.
+        const sam = list.find((m: any) => m.id === 'sam')
+        if (sam) setSelectedModel('sam')
       }
     } catch {}
   }
@@ -353,8 +530,9 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
       const fd = new FormData()
       fd.append('model_type', model.type)
       fd.append('pretrained', model.id)
-      // Gated HuggingFace models (SAM 3 / SAM 3.1) need a token. Reuse the
-      // one the user pasted on the Models page — stored under opensamannotator.hf_token.
+      // HF token is stored in Settings and kept in localStorage under this
+      // key. The backend also falls back to the HF_TOKEN env var if neither
+      // is supplied, so don't block on a missing localStorage entry.
       try {
         const stored = typeof window !== 'undefined'
           ? window.localStorage.getItem('opensamannotator.hf_token')
@@ -746,22 +924,33 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
     }
     if (activeTool === 'brush' && isBrushing) {
       setIsBrushing(false)
-      if (brushPoints.length > 3) {
-        // Convert brush stroke to a polygon annotation
+      if (brushPoints.length > 0) {
         const scale = scaleRef.current
         const img = imageRef.current
         if (!img) { setBrushPoints([]); return }
-        // Simplify brush points to convex hull approx
-        const pts = brushPoints.flatMap(p => [p.x / scale / img.width, p.y / scale / img.height])
-        const ann: Annotation = {
-          type: 'polygon',
-          class_id: localClasses.indexOf(activeClass),
-          class_name: activeClass || 'brush_mask',
-          points: pts,
-          normalized: true
+
+        // Rasterize the stroke to an offscreen canvas at source-image
+        // resolution, then trace the outline of the painted pixels. This
+        // produces a polygon that matches the actual painted area instead
+        // of the (clearly wrong) polygon connecting cursor waypoints.
+        const radiusImgPx = brushSize / scale
+        const pts = brushPoints.map(p => ({ x: p.x / scale, y: p.y / scale }))
+        const boundary = tracePaintedBoundary(pts, radiusImgPx, img.width, img.height)
+
+        if (boundary.length >= 6) {
+          const normalized = boundary.map((v, i) =>
+            i % 2 === 0 ? v / img.width : v / img.height
+          )
+          const ann: Annotation = {
+            type: 'polygon',
+            class_id: localClasses.indexOf(activeClass),
+            class_name: activeClass || 'brush_mask',
+            points: normalized,
+            normalized: true,
+          }
+          const next = [...annotations, ann]
+          setAnnotations(next); saveToHistory(next)
         }
-        const next = [...annotations, ann]
-        setAnnotations(next); saveToHistory(next)
       }
       setBrushPoints([])
       return
@@ -788,6 +977,15 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
   const handleSamClick = async (coords: { x: number; y: number }, negative: boolean = false) => {
     if (!selectedDataset || !currentImage || !selectedModel) {
       toast.error('Select a SAM-compatible model first')
+      return
+    }
+    // SAM requires *both* checkpoints — sam3 for point prompts, sam31
+    // for text prompts. The unified "downloaded" flag flips true only
+    // when both are on disk, so checking it here is a safety net in
+    // case the wand button wasn't properly disabled.
+    const samModel = models.find(m => m.id === 'sam')
+    if (!samModel?.downloaded) {
+      toast.error('SAM is not fully downloaded — click Download in the SAM panel.')
       return
     }
     const scale = scaleRef.current
@@ -862,9 +1060,25 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
     }
   }
 
-  const clearSamPoints = () => {
+  const clearSamPoints = async () => {
     setSamPoints([])
+    // Roll back to the pre-SAM-session annotation state so the mask
+    // produced by the last click is actually removed from the image,
+    // not just its point markers. Without this, clicking "Clear points"
+    // after a bad SAM run left the garbage annotations behind and they
+    // stayed saved in the backend.
+    const rollbackTo = samMasksBeforeRef.current
     samMasksBeforeRef.current = null
+    if (rollbackTo === null) return
+    setAnnotations(rollbackTo)
+    saveToHistory(rollbackTo)
+    if (selectedDataset && currentImage) {
+      try {
+        await saveAnnotations(false, rollbackTo)
+      } catch {
+        // saveAnnotations already shows a toast on failure; nothing else to do.
+      }
+    }
   }
 
   const commitKeypoints = () => {
@@ -979,6 +1193,75 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
     setAnnotations(next); saveToHistory(next); setSelectedAnnotation(null)
   }
 
+  /**
+   * Toggle the "No Objects" review flag for the current image.
+   *
+   * Persists via a dedicated review sidecar (not the annotation list) so
+   * the user's native YOLO/COCO label files stay clean. The image still
+   * shows as reviewed in the gallery, and YOLO export writes an empty
+   * label file for it so downstream trainers use it as a hard negative.
+   *
+   * Marking "No Objects" also wipes every existing annotation on the
+   * image — semantically, "there are no objects here" is incompatible
+   * with any remaining bbox/polygon/mask, and the common case is using
+   * this button to clean up after a bad SAM run.
+   */
+  const toggleNoObjects = async () => {
+    if (!selectedDataset || !currentImage) return
+    const next = !currentImage.reviewed_empty
+
+    // Optimistic local update of the flag.
+    const updatedImage = { ...currentImage, reviewed_empty: next }
+    setCurrentImage(updatedImage)
+    const updatedAll = allImages.map(img =>
+      img.id === currentImage.id ? { ...img, reviewed_empty: next, annotations: next ? [] : img.annotations } : img
+    )
+    silentRefreshRef.current = true
+    setAllImages(updatedAll)
+    updateImageCache(selectedDataset.id, updatedAll)
+
+    try {
+      // When enabling: blow away every annotation on the image.
+      if (next && annotations.length > 0) {
+        setAnnotations([])
+        saveToHistory([])
+        await saveAnnotations(false, [])
+      }
+
+      const resp = await fetch(
+        `${apiUrl}/api/datasets/${selectedDataset.id}/image/${currentImage.id}/review-empty?empty=${next}`,
+        { method: 'PUT' }
+      )
+      if (!resp.ok) throw new Error('Failed to save')
+      if (settings.notifications) {
+        toast.success(next ? 'Marked as No Objects' : 'No Objects mark removed')
+      }
+    } catch {
+      // Roll back local flag on failure. We intentionally don't restore
+      // deleted annotations — the user can undo that via Ctrl-Z.
+      setCurrentImage({ ...currentImage, reviewed_empty: !next })
+      toast.error('Failed to update review flag')
+    }
+  }
+
+  /**
+   * Wipe every annotation on the current image without touching the
+   * No Objects flag. Used by the rubbish-bin icon on the ANNOTATIONS
+   * panel heading. Undoable via Ctrl-Z.
+   */
+  const clearAllAnnotations = async () => {
+    if (!selectedDataset || !currentImage || annotations.length === 0) return
+    setAnnotations([])
+    saveToHistory([])
+    setSelectedAnnotation(null)
+    try {
+      await saveAnnotations(false, [])
+      if (settings.notifications) toast.success('All annotations cleared')
+    } catch {
+      // saveAnnotations already shows a toast on failure.
+    }
+  }
+
   const saveAnnotations = async (andAdvance = false, explicitAnns?: Annotation[]) => {
     if (!selectedDataset || !currentImage) return
     const annsToSave = explicitAnns ?? annotations
@@ -1009,11 +1292,15 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
 
   const [isModelLoading, setIsModelLoading] = useState(false)
 
-  const autoAnnotate = async () => {
-    if (!selectedDataset || !currentImage || !selectedModel) return
-    // Check if model is downloaded but not loaded into memory — first call will load it
-    const modelInfo = models.find(m => m.id === selectedModel)
-    const needsLoad = modelInfo?.downloaded && !modelInfo?.loaded
+  /**
+   * Run SAM 3.1 text-prompt segmentation on just the current image.
+   * The backend only accepts a single prompt per call, so we pass the
+   * user's string through verbatim.
+   */
+  const runAutoAnnotateSingle = async (prompt: string) => {
+    if (!selectedDataset || !currentImage) return
+    const samModel = models.find(m => m.id === 'sam')
+    const needsLoad = samModel?.downloaded && !samModel?.loaded
     if (needsLoad) {
       setIsModelLoading(true)
       toast.info('Loading model into memory — first annotation may take 10–30 s…', { duration: 20000, id: 'model-load' })
@@ -1021,32 +1308,36 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
     setIsAutoAnnotating(true)
     try {
       const params = new URLSearchParams({
-        model_id: selectedModel,
+        model_id: 'sam',
         confidence_threshold: String(confidence),
+        text_prompt: prompt,
       })
-      // Pass text prompt for SAM 3 concept segmentation
-      if (combinedPrompt) params.set('text_prompt', combinedPrompt)
       if (currentImage.path) params.set('image_path_hint', currentImage.path)
       const resp = await fetch(
         `${apiUrl}/api/auto-annotate/${selectedDataset.id}/single/${currentImage.id}?${params}`,
         { method: 'POST' }
       )
       if (needsLoad) toast.dismiss('model-load')
-      if (!resp.ok) throw new Error('Auto-annotation failed')
+      if (!resp.ok) {
+        let detail = 'Auto-annotation failed'
+        try {
+          const errJson = await resp.json()
+          if (errJson?.detail) detail = errJson.detail
+        } catch {}
+        throw new Error(detail)
+      }
       const data = await resp.json()
       if (data.annotations?.length) {
         const next = [...annotations, ...data.annotations]
         setAnnotations(next)
         saveToHistory(next)
-        // Save to dataset immediately so annotations persist
         await saveAnnotations(false, next)
       } else {
-        toast.info('No objects detected')
+        toast.info(`No "${prompt}" found in this image`)
       }
-      // Refresh model list so the model shows as loaded now
       if (needsLoad) loadModels()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Auto-annotation failed')
+      toast.error(err instanceof Error ? err.message : 'Auto-annotation failed')
     } finally {
       setIsAutoAnnotating(false)
       setIsModelLoading(false)
@@ -1076,16 +1367,6 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
     }
   }
 
-  const combinedPrompt = promptTags.join(', ')
-
-  const addPromptTag = (raw: string) => {
-    const tags = raw.split(',').map(t => t.trim()).filter(Boolean)
-    setPromptTags(prev => [...prev, ...tags.filter(t => !prev.includes(t))])
-    setPromptInput('')
-  }
-
-  const removePromptTag = (tag: string) =>
-    setPromptTags(prev => prev.filter(t => t !== tag))
 
   /**
    * Poll a single batch job until it finishes.
@@ -1170,45 +1451,18 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
     })()
   }, [sidebarTab]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const textAnnotateSingle = async () => {
-    if (!selectedDataset || !currentImage || !selectedModel || !combinedPrompt) return
-    setIsAutoAnnotating(true)
-    try {
-      const params = new URLSearchParams({
-        model_id: selectedModel,
-        confidence_threshold: String(confidence),
-        text_prompt: combinedPrompt,
-      })
-      if (currentImage.path) params.set('image_path_hint', currentImage.path)
-      const resp = await fetch(
-        `${apiUrl}/api/auto-annotate/${selectedDataset.id}/single/${currentImage.id}?${params}`,
-        { method: 'POST' }
-      )
-      if (!resp.ok) throw new Error('Text annotation failed')
-      const data = await resp.json()
-      if (data.annotations?.length) {
-        const next = [...annotations, ...data.annotations]
-        setAnnotations(next)
-        saveToHistory(next)
-        await saveAnnotations(false, next)
-        toast.success(`Found ${data.annotations.length} annotation(s) for "${combinedPrompt}"`)
-      } else {
-        toast.info('No objects matched the text prompt on this image')
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Text annotation failed')
-    } finally {
-      setIsAutoAnnotating(false)
-    }
-  }
-
-  const textAnnotateBatch = async () => {
-    if (!selectedDataset || !selectedModel || !combinedPrompt || isStartingBatch) return
+  /**
+   * Kick off a dataset-wide SAM text-prompt batch job. SAM 3.1 only accepts
+   * one prompt per call, so this runs a single pass over every image with
+   * the provided phrase.
+   */
+  const textAnnotateBatch = async (prompt: string) => {
+    if (!selectedDataset || !prompt || isStartingBatch) return
     setIsStartingBatch(true)
     try {
       const params = new URLSearchParams({
-        model_id: selectedModel,
-        text_prompt: combinedPrompt,
+        model_id: 'sam',
+        text_prompt: prompt,
         confidence_threshold: String(confidence),
       })
       const resp = await fetch(
@@ -1218,7 +1472,6 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
       if (!resp.ok) throw new Error('Failed to start batch annotation')
       const { job_id } = await resp.json()
 
-      // Register job in state immediately so the monitor shows it right away
       setBatchJobs(prev => ({
         ...prev,
         [job_id]: {
@@ -1231,13 +1484,13 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
           annotated: 0,
           failed: 0,
           total_annotations: 0,
-          text_prompt: combinedPrompt,
+          text_prompt: prompt,
           started_at: new Date().toISOString(),
           dataset_id: selectedDataset.id,
           recent_images: [],
         },
       }))
-      toast.success(`Batch job started (${combinedPrompt})`)
+      toast.success(`Batch job started ("${prompt}")`)
       setSidebarTab('jobs')
       _pollJob(job_id)
     } catch (err) {
@@ -1408,12 +1661,39 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
               <Brush className="w-4 h-4" />
               <span className="ml-1 text-[10px] font-mono opacity-70">R</span>
             </Button>
-            <Button size="sm" variant={activeTool === 'sam' ? 'default' : 'outline'}
-              onClick={() => switchTool('sam')} title="SAM click-to-segment (Q)">
+            <Button
+              size="sm"
+              variant={activeTool === 'sam' ? 'default' : 'outline'}
+              onClick={() => switchTool('sam')}
+              disabled={!models.find(m => m.id === 'sam')?.downloaded}
+              title={
+                models.find(m => m.id === 'sam')?.downloaded
+                  ? 'SAM click-to-segment (Q)'
+                  : 'Download SAM from the panel on the right to enable the wand'
+              }
+            >
               {isSamLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
               <span className="ml-1 text-[10px] font-mono opacity-70">Q</span>
             </Button>
           </div>
+
+          <div className="w-px h-6 bg-border" />
+
+          {/* No Objects — mark current image as a reviewed negative sample */}
+          <Button
+            size="sm"
+            variant={currentImage?.reviewed_empty ? 'default' : 'outline'}
+            onClick={toggleNoObjects}
+            disabled={!currentImage}
+            title="Mark this image as reviewed with no objects (negative sample)"
+            className="gap-1.5"
+          >
+            {currentImage?.reviewed_empty
+              ? <CheckCircle2 className="w-4 h-4" />
+              : <X className="w-4 h-4" />
+            }
+            <span className="text-xs">No Objects</span>
+          </Button>
 
           {/* Brush size (shown when brush active) */}
           {activeTool === 'brush' && (
@@ -1748,41 +2028,38 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
         {/* ── Annotate tab ─────────────────────────────────────────────── */}
         {sidebarTab === 'annotate' && <>
 
-        {/* Model + confidence */}
+        {/* SAM panel: status + confidence + auto-annotate */}
         <div className="p-3 space-y-3 border-b border-border">
-          <Select
-            value={selectedModel}
-            onValueChange={v => {
-              const m = models.find(m => m.id === v)
-              if (m && !m.downloaded && downloadingModelId !== m.id) downloadModel(m)
-              else if (m?.downloaded) setSelectedModel(v)
-            }}
-          >
-            <SelectTrigger className="h-8 text-xs bg-background border-border">
-              {downloadingModelId
-                ? <span className="flex items-center gap-1.5 text-muted-foreground">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    Downloading…
+          {(() => {
+            const samModel = models.find(m => m.id === 'sam')
+            const ready = !!samModel?.downloaded
+            const downloading = downloadingModelId === 'sam'
+            return (
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-mono font-semibold uppercase tracking-[0.18em] text-muted-foreground/70">
+                  SAM
+                </span>
+                {downloading ? (
+                  <span className="text-[10px] text-primary font-mono flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Downloading…
                   </span>
-                : <SelectValue placeholder="Select model…" />
-              }
-            </SelectTrigger>
-            <SelectContent>
-              {models.map(m => (
-                <SelectItem key={m.id} value={m.id} disabled={!m.downloaded && downloadingModelId !== m.id && downloadingModelId !== null}>
-                  <div className="flex items-center gap-2 w-full">
-                    <span className="flex-1 truncate">{m.name}</span>
-                    {downloadingModelId === m.id
-                      ? <span className="text-[9px] text-primary font-mono shrink-0 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" />Downloading</span>
-                      : m.downloaded
-                        ? <CheckCircle2 className="w-3 h-3 text-primary shrink-0" />
-                        : <Download className="w-3 h-3 text-muted-foreground shrink-0" />
-                    }
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+                ) : ready ? (
+                  <span className="text-[10px] text-primary font-mono flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3" /> Ready
+                  </span>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-6 px-2 text-[10px] gap-1"
+                    onClick={() => downloadModel({ id: 'sam', name: 'SAM', type: 'sam3' })}
+                  >
+                    <Download className="w-3 h-3" /> Download
+                  </Button>
+                )}
+              </div>
+            )
+          })()}
 
           <div>
             <div className="flex items-center justify-between mb-1.5">
@@ -1794,109 +2071,20 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
 
           <Button
             className="w-full h-8 text-xs gap-1.5 font-medium"
-            onClick={autoAnnotate}
-            disabled={!selectedModel || isAutoAnnotating || runningJobCount > 0}
+            onClick={() => {
+              setAutoAnnotatePromptInput('')
+              setShowAutoAnnotateDialog(true)
+            }}
+            disabled={!models.find(m => m.id === 'sam')?.downloaded || isAutoAnnotating || runningJobCount > 0}
           >
             {isModelLoading
               ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading model…</>
               : isAutoAnnotating
                 ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Annotating…</>
-                : <><Wand2 className="w-3.5 h-3.5" strokeWidth={1.5} /> Auto-Annotate</>
+                : <><Wand2 className="w-3.5 h-3.5" strokeWidth={1.5} /> Auto-Annotate…</>
             }
           </Button>
         </div>
-
-        {/* Text prompt section — shown for SAM 3 concept segmentation */}
-        {(() => {
-          const selModel = models.find(m => m.id === selectedModel)
-          const isTextModel = selModel && selModel.type === 'sam3'
-          if (!isTextModel) return null
-          const sectionLabel = 'Text Segment'
-          return (
-            <div className="p-3 space-y-2.5 border-b border-border">
-              {/* Section label */}
-              <div className="flex items-center justify-between">
-                <p className="text-[9px] font-mono font-semibold uppercase tracking-[0.18em] text-primary/70">
-                  {sectionLabel}
-                </p>
-                {totalJobCount > 0 && (
-                  <button onClick={() => setSidebarTab('jobs')}
-                    className="text-[9px] font-mono text-muted-foreground hover:text-primary flex items-center gap-1.5 transition-colors">
-                    {runningJobCount > 0 && <span className="live-dot text-primary" />}
-                    {totalJobCount} job{totalJobCount !== 1 ? 's' : ''}
-                  </button>
-                )}
-              </div>
-
-              {/* Tag chips */}
-              {promptTags.length > 0 && (
-                <div className="flex flex-wrap gap-1">
-                  {promptTags.map(tag => (
-                    <span key={tag}
-                      className="flex items-center gap-0.5 pl-2 pr-1 py-0.5 bg-primary/10 text-primary border border-primary/20 rounded-full text-[10px] font-medium">
-                      {tag}
-                      <button onClick={() => removePromptTag(tag)}
-                        className="hover:text-primary/60 transition-colors ml-0.5">
-                        <X className="w-2.5 h-2.5" />
-                      </button>
-                    </span>
-                  ))}
-                  <button onClick={() => setPromptTags([])}
-                    className="text-[10px] text-muted-foreground/60 hover:text-muted-foreground px-1 transition-colors">
-                    clear
-                  </button>
-                </div>
-              )}
-
-              {/* Label input */}
-              <div className="flex gap-1">
-                <Input
-                  value={promptInput}
-                  onChange={e => setPromptInput(e.target.value)}
-                  onKeyDown={e => {
-                    if ((e.key === 'Enter' || e.key === ',') && promptInput.trim()) {
-                      e.preventDefault(); addPromptTag(promptInput)
-                    }
-                  }}
-                  placeholder={promptTags.length ? 'Add label…' : 'car, person, dog…'}
-                  className="h-7 text-xs flex-1 bg-background border-border"
-                />
-                <Button size="sm" variant="outline"
-                  className="h-7 w-7 p-0 shrink-0 border-border"
-                  onClick={() => promptInput.trim() && addPromptTag(promptInput)}
-                  disabled={!promptInput.trim()}>
-                  <Plus className="w-3 h-3" />
-                </Button>
-              </div>
-              <p className="text-[10px] text-muted-foreground leading-relaxed">
-                Enter or <kbd className="px-1 bg-muted rounded text-[9px]">,</kbd> adds a label.
-              </p>
-
-              {/* Annotate this image */}
-              <Button size="sm" variant="outline"
-                className="w-full h-7 text-xs gap-1.5 border-border hover:border-primary/40 hover:text-primary"
-                onClick={textAnnotateSingle}
-                disabled={promptTags.length === 0 || isAutoAnnotating}>
-                {isAutoAnnotating
-                  ? <Loader2 className="w-3 h-3 animate-spin" />
-                  : <Wand2 className="w-3 h-3" strokeWidth={1.5} />
-                }
-                Annotate This Image
-              </Button>
-
-              {/* Batch annotate */}
-              <Button size="sm"
-                className="w-full h-8 text-xs gap-1.5 font-semibold bg-primary text-primary-foreground hover:bg-primary/90"
-                onClick={textAnnotateBatch}
-                disabled={promptTags.length === 0 || isAutoAnnotating || isStartingBatch}>
-                {isStartingBatch
-                  ? <><Loader2 className="w-3 h-3 animate-spin" /> Starting…</>
-                  : <><ChevronsRight className="w-3.5 h-3.5" /> Batch Annotate Dataset</>
-                }
-              </Button>
-            </div>
-          )
-        })()}
 
         {/* Annotations list */}
         <div className="flex-1 overflow-hidden flex flex-col min-h-0">
@@ -1904,7 +2092,17 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
             <p className="text-[9px] font-mono font-semibold uppercase tracking-[0.18em] text-muted-foreground/60">
               Annotations
             </p>
-            <span className="text-[10px] font-mono text-primary">{annotations.length}</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-mono text-primary">{annotations.length}</span>
+              <button
+                onClick={clearAllAnnotations}
+                disabled={annotations.length === 0}
+                title="Clear all annotations on this image"
+                className="p-0.5 rounded text-muted-foreground/60 hover:text-destructive hover:bg-destructive/10 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-muted-foreground/60 transition-colors"
+              >
+                <Trash2 className="w-3 h-3" strokeWidth={1.5} />
+              </button>
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto p-2">
             {annotations.length === 0 ? (
@@ -2172,6 +2370,72 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
           <button onClick={() => setError(null)} className="ml-auto text-xs underline">Dismiss</button>
         </div>
       )}
+
+      {/* ── Auto-Annotate text prompt dialog ─────────────────────────────── */}
+      <Dialog open={showAutoAnnotateDialog} onOpenChange={setShowAutoAnnotateDialog}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Wand2 className="w-4 h-4 text-primary" /> Auto-Annotate
+            </DialogTitle>
+            <DialogDescription>
+              SAM 3.1 segments everything matching a short text phrase. One phrase per run.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Input
+              autoFocus
+              value={autoAnnotatePromptInput}
+              onChange={e => setAutoAnnotatePromptInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && autoAnnotatePromptInput.trim()) {
+                  e.preventDefault()
+                  const prompt = autoAnnotatePromptInput.trim()
+                  setShowAutoAnnotateDialog(false)
+                  runAutoAnnotateSingle(prompt)
+                }
+              }}
+              placeholder="e.g. person, car, red apple"
+              className="font-mono text-sm"
+            />
+            <p className="text-xs text-muted-foreground">
+              A single noun phrase works best. Press <kbd className="px-1 bg-muted rounded text-[10px]">Enter</kbd> to annotate this image only, or use <strong>Batch</strong> to run on every image in the dataset.
+            </p>
+          </div>
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <Button variant="ghost" onClick={() => setShowAutoAnnotateDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="outline"
+              disabled={!autoAnnotatePromptInput.trim() || isStartingBatch}
+              onClick={() => {
+                const prompt = autoAnnotatePromptInput.trim()
+                setShowAutoAnnotateDialog(false)
+                textAnnotateBatch(prompt)
+              }}
+            >
+              {isStartingBatch
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Starting…</>
+                : <><ChevronsRight className="w-3.5 h-3.5" /> Batch Dataset</>
+              }
+            </Button>
+            <Button
+              disabled={!autoAnnotatePromptInput.trim() || isAutoAnnotating}
+              onClick={() => {
+                const prompt = autoAnnotatePromptInput.trim()
+                setShowAutoAnnotateDialog(false)
+                runAutoAnnotateSingle(prompt)
+              }}
+            >
+              {isAutoAnnotating
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Annotating…</>
+                : <><Wand2 className="w-3.5 h-3.5" /> This Image</>
+              }
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

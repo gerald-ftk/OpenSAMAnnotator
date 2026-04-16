@@ -16,9 +16,24 @@ from PIL import Image
 
 
 class ModelManager:
-    """Manage SAM 3 / SAM 3.1 models for interactive and batch annotation."""
+    """Manage SAM 3 / SAM 3.1 models for interactive and batch annotation.
 
-    # Full pretrained catalog — single source of truth used by list_models()
+    Two checkpoints are used internally — kept invisible to the frontend:
+
+    - ``sam3``  (facebook/sam3) provides the SAM2 interactive predictor
+      needed for point-prompt segmentation.
+    - ``sam31`` (facebook/sam3.1) is the improved text-grounded detector.
+      Its multiplex tracker weights are video-specific and are NOT
+      compatible with interactive point prompts.
+
+    The frontend sees a single ``sam`` model. Inference methods dispatch
+    to the right backing checkpoint based on the prompt kind.
+    """
+
+    PUBLIC_MODEL_ID = "sam"
+    PUBLIC_MODEL_NAME = "SAM"
+
+    # Internal catalog — what the UI shows is synthesized from this.
     _PRETRAINED_CATALOG = [
         {"id": "sam3",  "name": "SAM 3",   "type": "sam3", "pretrained": True},
         {"id": "sam31", "name": "SAM 3.1", "type": "sam3", "pretrained": True},
@@ -44,49 +59,61 @@ class ModelManager:
 
     # ── Discovery ────────────────────────────────────────────────────────────
 
+    def is_fully_downloaded(self) -> bool:
+        """True when both sam3 + sam31 checkpoints are on disk.
+
+        Auto-annotation refuses to run unless both are present so we
+        never silently fall back to an incomplete install (which is what
+        produced whole-image garbage masks from sam31's random-weight
+        inst_interactive_predictor).
+        """
+        return (
+            self._backing_state("sam3")["downloaded"]
+            and self._backing_state("sam31")["downloaded"]
+        )
+
+    def _backing_state(self, internal_id: str) -> Dict[str, Any]:
+        """Current state of one backing checkpoint (sam3 or sam31)."""
+        info = self.loaded_models.get(internal_id, {})
+        loaded = info.get("model") is not None
+        _, filename = self._HF_GATED_MODELS[internal_id]
+        disk = (self.models_dir / filename).exists()
+        return {
+            "loaded": loaded,
+            "downloaded": loaded or disk,
+            "error": info.get("error"),
+            "path": str(self.models_dir / filename) if disk else None,
+        }
+
     def list_models(self) -> List[Dict[str, Any]]:
-        """List SAM 3 / SAM 3.1 entries — loaded, downloaded, or catalog."""
-        models: List[Dict[str, Any]] = []
-        seen_ids: set = set()
+        """Return a single synthesized ``sam`` entry hiding backing checkpoints.
 
-        # 1. In-memory loaded models
-        for model_id, info in self.loaded_models.items():
-            seen_ids.add(model_id)
-            is_loaded = info.get("model") is not None
-            path_str = info.get("path")
-            path_on_disk = bool(path_str) and Path(path_str).exists()
-            models.append({
-                "id": model_id,
-                "name": info.get("name") or model_id,
-                "type": info.get("type", "sam3"),
-                "loaded": is_loaded,
-                "pretrained": info.get("pretrained", True),
-                "classes": info.get("classes", []),
-                "error": info.get("error"),
-                "downloaded": is_loaded or path_on_disk,
-            })
+        The UI never sees sam3 / sam31 — the backend dispatches to the
+        right checkpoint internally based on prompt kind.
+        """
+        sam3 = self._backing_state("sam3")
+        sam31 = self._backing_state("sam31")
 
-        # 2. Checkpoints present on disk in workspace/models/
-        for entry in self._PRETRAINED_CATALOG:
-            if entry["id"] in seen_ids:
-                continue
-            _, filename = self._HF_GATED_MODELS[entry["id"]]
-            local_path = self.models_dir / filename
-            if local_path.exists():
-                seen_ids.add(entry["id"])
-                models.append({
-                    **entry,
-                    "loaded": False,
-                    "downloaded": True,
-                    "path": str(local_path),
-                })
+        # Both checkpoints are required before auto-annotation unlocks:
+        # sam3 powers point-prompt interactive segmentation, sam31 powers
+        # text-grounded segmentation. A partial install would leave one
+        # of those paths producing garbage, so the unified entry only
+        # reports "downloaded" when *both* are present.
+        fully_downloaded = sam3["downloaded"] and sam31["downloaded"]
+        any_loaded = sam3["loaded"] or sam31["loaded"]
+        error = sam3.get("error") or sam31.get("error")
 
-        # 3. Catalog entries not yet downloaded
-        for entry in self._PRETRAINED_CATALOG:
-            if entry["id"] not in seen_ids:
-                models.append({**entry, "loaded": False, "downloaded": False})
-
-        return models
+        return [{
+            "id": self.PUBLIC_MODEL_ID,
+            "name": self.PUBLIC_MODEL_NAME,
+            "type": "sam3",
+            "pretrained": True,
+            "loaded": any_loaded and fully_downloaded,
+            "downloaded": fully_downloaded,
+            "classes": [],
+            "error": error if not fully_downloaded else None,
+            "backing": {"sam3": sam3, "sam31": sam31},
+        }]
 
     # ── Loading ──────────────────────────────────────────────────────────────
 
@@ -116,7 +143,47 @@ class ModelManager:
     def load_pretrained(
         self, model_type: str, model_name: str, hf_token: Optional[str] = None
     ) -> str:
-        """Download a gated SAM 3 / 3.1 checkpoint from HuggingFace and build the model."""
+        """Download a gated SAM checkpoint from HuggingFace and build the model.
+
+        Accepts the public ``sam`` alias (downloads *both* backing checkpoints
+        so point prompts and text prompts both work) or a specific backing
+        id (``sam3`` / ``sam31``) for internal use.
+        """
+        # If no explicit token, fall back to the HF_TOKEN environment variable
+        # so users who already have `huggingface-cli login` or an env export
+        # don't need to re-paste it.
+        if not hf_token:
+            hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN")
+
+        if model_name == self.PUBLIC_MODEL_ID:
+            # Download both backing checkpoints. The user only ever asked
+            # for "sam"; we keep the two files in sync on disk.
+            last_err: Optional[str] = None
+            for backing_id in ("sam3", "sam31"):
+                try:
+                    self._load_one_backing(backing_id, hf_token)
+                except Exception as exc:
+                    last_err = str(exc)
+            # Surface the most recent error via last_load_result so the
+            # UI's download-status polling can show something meaningful.
+            self.last_load_result[self.PUBLIC_MODEL_ID] = {
+                "error": last_err,
+                "has_model": any(
+                    self.loaded_models.get(b, {}).get("model") is not None
+                    for b in ("sam3", "sam31")
+                ),
+                "has_path": any(
+                    (self.models_dir / self._HF_GATED_MODELS[b][1]).exists()
+                    for b in ("sam3", "sam31")
+                ),
+            }
+            return self.PUBLIC_MODEL_ID
+
+        self._load_one_backing(model_name, hf_token)
+        return model_name
+
+    def _load_one_backing(self, model_name: str, hf_token: Optional[str]) -> str:
+        """Download + build a single backing checkpoint (sam3 or sam31)."""
         model_id = model_name
         model_info: Dict[str, Any] = {
             "id": model_id,
@@ -172,9 +239,9 @@ class ModelManager:
         if not local_model_path.exists():
             if not hf_token:
                 model_info["error"] = (
-                    f"{model_name} is a gated HuggingFace model. "
+                    "SAM is a gated HuggingFace model. "
                     "Paste your HuggingFace access token (hf.co/settings/tokens) "
-                    "in the Models page to download it."
+                    "in Settings, or set HF_TOKEN in the environment, to download it."
                 )
                 model_info["loaded"] = False
                 return model_info
@@ -226,9 +293,12 @@ class ModelManager:
             from sam3.model.sam3_image_processor import Sam3Processor
             import sam3 as _sam3_pkg
         except ImportError as exc:
+            # Surface the actual missing module (sam3 itself, or a transitive
+            # dep like einops/pycocotools) instead of a generic "not installed".
+            missing = getattr(exc, "name", None) or str(exc)
             raise RuntimeError(
-                "The `sam3` package is not installed. Install it with "
-                "`pip install git+https://github.com/facebookresearch/sam3.git`"
+                f"Failed to import sam3 dependencies: {missing}. "
+                f"If `{missing}` is a transitive dep, add it to pyproject.toml."
             ) from exc
 
         bpe_path = (
@@ -303,6 +373,42 @@ class ModelManager:
             pass
         return "cpu"
 
+    # ── Prompt routing ───────────────────────────────────────────────────────
+
+    def _resolve_backing(
+        self,
+        prompt_points: Optional[List[Dict[str, Any]]],
+        text_prompt: Optional[str],
+    ) -> Optional[str]:
+        """Pick the backing checkpoint for the given prompt type.
+
+        Point prompts REQUIRE the original SAM 3 checkpoint. The SAM 3.1
+        multiplex weights are video-tracker specific and fill the
+        inst_interactive_predictor with random initialisation, which
+        produces whole-image garbage masks — so we refuse to fall back.
+        Callers that get ``None`` for a point prompt should surface a
+        "need sam3" error to the user instead of running garbage.
+
+        Text prompts prefer the newer SAM 3.1 detector and fall back to
+        SAM 3 if 3.1 isn't available.
+        """
+        def _try(backing_id: str) -> bool:
+            info = self.loaded_models.get(backing_id, {})
+            if info.get("model") is not None:
+                return True
+            self._try_autoload(backing_id)
+            return self.loaded_models.get(backing_id, {}).get("model") is not None
+
+        if prompt_points and not text_prompt:
+            # Point prompts: only sam3, no fallback.
+            return "sam3" if _try("sam3") else None
+
+        # Text or no prompt: sam31 preferred, sam3 acceptable.
+        for backing_id in ("sam31", "sam3"):
+            if _try(backing_id):
+                return backing_id
+        return None
+
     # ── Single-image inference ───────────────────────────────────────────────
 
     def annotate_single_image(
@@ -317,16 +423,30 @@ class ModelManager:
         text_prompt: Optional[str] = None,
         image_path_hint: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run SAM 3 on a single image with point, text, or auto prompts."""
+        """Run SAM on a single image with point, text, or auto prompts.
+
+        ``model_id`` is effectively advisory — the real checkpoint is picked
+        by prompt type (point prompts → sam3, text prompts → sam31).
+        """
         self._last_text_error = None
 
-        if model_id not in self.loaded_models or not self.loaded_models[model_id].get("model"):
-            self._try_autoload(model_id)
-
-        if model_id not in self.loaded_models:
+        # Refuse anything unless both checkpoints are on disk. Letting one
+        # path work with a partial install silently breaks the other in
+        # confusing ways (garbage masks from sam31 for point prompts).
+        if not self.is_fully_downloaded():
+            self._last_text_error = "SAM is not fully downloaded — both SAM 3 and SAM 3.1 checkpoints are required."
             return []
 
-        model_info = self.loaded_models[model_id]
+        # Legacy single-point callers → new prompt_points shape (so the
+        # resolver sees the right prompt kind).
+        if prompt_points is None and prompt_point is not None:
+            prompt_points = [{"x": prompt_point[0], "y": prompt_point[1], "label": 1}]
+
+        backing_id = self._resolve_backing(prompt_points, text_prompt)
+        if not backing_id:
+            return []
+
+        model_info = self.loaded_models[backing_id]
         model = model_info.get("model")
         model_type = model_info.get("type", "sam3")
         if not model:
@@ -353,10 +473,6 @@ class ModelManager:
         if not image_file:
             return []
 
-        # Legacy single-point callers → new prompt_points shape
-        if prompt_points is None and prompt_point is not None:
-            prompt_points = [{"x": prompt_point[0], "y": prompt_point[1], "label": 1}]
-
         try:
             return self._run_inference(
                 model, model_type, image_file, confidence_threshold,
@@ -364,7 +480,8 @@ class ModelManager:
                 text_prompt=text_prompt,
                 model_classes=model_info.get("classes") or [],
             )
-        except Exception:
+        except Exception as exc:
+            print(f"[sam] _run_inference raised: {type(exc).__name__}: {exc}", flush=True)
             return []
 
     # ── Batch auto-annotation ────────────────────────────────────────────────
@@ -378,12 +495,16 @@ class ModelManager:
         text_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Auto-annotate all images in a dataset using a text prompt (batch)."""
-        if model_id not in self.loaded_models:
-            self._try_autoload(model_id)
-        if model_id not in self.loaded_models:
+        if not self.is_fully_downloaded():
+            return {"error": "SAM is not fully downloaded — both SAM 3 and SAM 3.1 checkpoints are required."}
+
+        # Batch auto-annotate is always text-prompt driven, so resolve
+        # to the text-capable backing checkpoint (sam31 preferred).
+        backing_id = self._resolve_backing(prompt_points=None, text_prompt=text_prompt or "")
+        if not backing_id:
             return {"error": "Model not loaded"}
 
-        model_info = self.loaded_models[model_id]
+        model_info = self.loaded_models[backing_id]
         model = model_info.get("model")
         model_type = model_info.get("type", "sam3")
 
@@ -435,9 +556,8 @@ class ModelManager:
         new_classes: List[str],
     ) -> Dict[str, Any]:
         """Annotate a dataset with a list of text prompts (one per class)."""
-        if model_id not in self.loaded_models:
-            self._try_autoload(model_id)
-        if model_id not in self.loaded_models:
+        # Same deal as auto_annotate — text-prompt path.
+        if self._resolve_backing(prompt_points=None, text_prompt="x") is None:
             return {"error": "Model not loaded"}
 
         if not new_classes:
@@ -546,7 +666,11 @@ class ModelManager:
                 if masks_np is None:
                     continue
 
-                # Normalize to (N, H, W)
+                # Sam3Processor returns (N, 1, H, W) from _forward_grounding
+                # (the unsqueeze at interpolate time). Drop the singleton
+                # channel dim so cv2.findContours gets a real 2D mask.
+                if masks_np.ndim == 4 and masks_np.shape[1] == 1:
+                    masks_np = masks_np[:, 0]
                 if masks_np.ndim == 2:
                     masks_np = masks_np[None, ...]
 

@@ -20,6 +20,8 @@ dependencies = [
     "huggingface_hub>=0.24.0",
     "torch>=2.1.0",
     "torchvision>=0.16.0",
+    "einops>=0.7.0",
+    "pycocotools>=2.0.7",
     "sam3 @ git+https://github.com/facebookresearch/sam3.git",
 ]
 
