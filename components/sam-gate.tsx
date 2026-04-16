@@ -13,6 +13,7 @@ const HF_TOKEN_KEY = 'opensamannotator.hf_token'
 
 interface SamStatus {
   ready: boolean
+  gpu_available: boolean
   downloading: boolean
   progress: number
   error: string | null
@@ -73,6 +74,11 @@ export function SamGate({
           setInitialLoad(false)
           if (data.ready) {
             onReady()
+            return
+          }
+          // No GPU — skip the download gate entirely.
+          if (data.gpu_available === false) {
+            onDismiss()
             return
           }
         }

@@ -287,14 +287,21 @@ class ModelManager:
 
         Instance interactivity is always enabled so the SAM wand can call
         `model.predict_inst()` with point prompts.
+
+        Requires a working CUDA GPU — the sam3 library hardcodes
+        ``device="cuda"`` throughout model construction and inference.
         """
+        device = self._get_device()
+        if device != "cuda":
+            raise RuntimeError(
+                "SAM requires a CUDA-capable GPU. No usable GPU was detected."
+            )
+
         try:
             from sam3 import build_sam3_image_model
             from sam3.model.sam3_image_processor import Sam3Processor
             import sam3 as _sam3_pkg
         except ImportError as exc:
-            # Surface the actual missing module (sam3 itself, or a transitive
-            # dep like einops/pycocotools) instead of a generic "not installed".
             missing = getattr(exc, "name", None) or str(exc)
             raise RuntimeError(
                 f"Failed to import sam3 dependencies: {missing}. "
@@ -308,8 +315,6 @@ class ModelManager:
             raise RuntimeError(
                 f"BPE vocab not found at {bpe_path} — the sam3 package install is incomplete."
             )
-
-        device = self._get_device()
 
         model = build_sam3_image_model(
             bpe_path=str(bpe_path),
@@ -721,11 +726,9 @@ class ModelManager:
             except Exception as exc:
                 print(f"[sam3_point] predict_inst failed: {exc}")
                 return annotations
-
             masks_np = _to_numpy(masks)
             scores_np = _to_numpy(scores)
             if masks_np is None or masks_np.size == 0:
-                print("[sam3_point] predict_inst returned no masks")
                 return annotations
 
             if masks_np.ndim == 2:

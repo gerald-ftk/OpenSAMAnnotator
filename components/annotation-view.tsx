@@ -287,6 +287,7 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
   const [confidence, setConfidence] = useState(0.5)
   const [isAutoAnnotating, setIsAutoAnnotating] = useState(false)
   const [downloadingModelId, setDownloadingModelId] = useState<string | null>(null)
+  const [gpuAvailable, setGpuAvailable] = useState(true)
   // Auto-Annotate dialog — single text prompt (SAM 3.1 only accepts one)
   const [showAutoAnnotateDialog, setShowAutoAnnotateDialog] = useState(false)
   const [autoAnnotatePromptInput, setAutoAnnotatePromptInput] = useState('')
@@ -505,6 +506,7 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
       const r = await fetch(`${apiUrl}/api/models`)
       if (r.ok) {
         const d = await r.json()
+        setGpuAvailable(d.gpu_available !== false)
         const list = (d.models || []).map((m: any) => ({
           id: m.id,
           name: m.name,
@@ -1665,11 +1667,13 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
               size="sm"
               variant={activeTool === 'sam' ? 'default' : 'outline'}
               onClick={() => switchTool('sam')}
-              disabled={!models.find(m => m.id === 'sam')?.downloaded}
+              disabled={!gpuAvailable || !models.find(m => m.id === 'sam')?.downloaded}
               title={
-                models.find(m => m.id === 'sam')?.downloaded
-                  ? 'SAM click-to-segment (Q)'
-                  : 'Download SAM from the panel on the right to enable the wand'
+                !gpuAvailable
+                  ? 'SAM requires a CUDA GPU'
+                  : models.find(m => m.id === 'sam')?.downloaded
+                    ? 'SAM click-to-segment (Q)'
+                    : 'Download SAM from the panel on the right to enable the wand'
               }
             >
               {isSamLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
@@ -2030,6 +2034,11 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
 
         {/* SAM panel: status + confidence + auto-annotate */}
         <div className="p-3 space-y-3 border-b border-border">
+          {!gpuAvailable && (
+            <p className="text-[10px] text-destructive font-medium">
+              No CUDA GPU detected — SAM features are disabled.
+            </p>
+          )}
           {(() => {
             const samModel = models.find(m => m.id === 'sam')
             const ready = !!samModel?.downloaded
@@ -2075,7 +2084,7 @@ export function AnnotationView({ selectedDataset, apiUrl, imageCache, updateImag
               setAutoAnnotatePromptInput('')
               setShowAutoAnnotateDialog(true)
             }}
-            disabled={!models.find(m => m.id === 'sam')?.downloaded || isAutoAnnotating || runningJobCount > 0}
+            disabled={!gpuAvailable || !models.find(m => m.id === 'sam')?.downloaded || isAutoAnnotating || runningJobCount > 0}
           >
             {isModelLoading
               ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading model…</>

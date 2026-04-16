@@ -243,8 +243,9 @@ def _probe_gpu() -> None:
             return
         _gpu_status.update({
             "state": "no_gpu",
-            "message": f"CUDA not available (torch {torch.__version__}). Inference runs on CPU.",
+            "message": f"CUDA not available (torch {torch.__version__}). SAM requires a CUDA GPU.",
         })
+        print("[GPU] No usable CUDA GPU detected — SAM auto-annotation is disabled.")
     except ImportError:
         _gpu_status.update({
             "state": "no_gpu",
@@ -1483,7 +1484,10 @@ async def add_images_to_dataset(dataset_id: str, files: List[UploadFile] = File(
 @app.get("/api/models")
 async def list_models():
     """List available models for auto-annotation"""
-    return {"models": model_manager.list_models()}
+    return {
+        "models": model_manager.list_models(),
+        "gpu_available": _gpu_status.get("state") == "ready",
+    }
 
 
 @app.post("/api/models/load")
@@ -1560,8 +1564,10 @@ async def get_sam_status():
     or let the user dismiss and continue without SAM.
     """
     dl = _download_status.get("sam", {"status": "idle", "progress": 0})
+    gpu_ok = _gpu_status.get("state") == "ready"
     return {
-        "ready": model_manager.is_fully_downloaded(),
+        "ready": model_manager.is_fully_downloaded() and gpu_ok,
+        "gpu_available": gpu_ok,
         "downloading": dl.get("status") == "downloading",
         "progress": dl.get("progress", 0),
         "error": dl.get("error"),
